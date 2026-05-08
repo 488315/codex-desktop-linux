@@ -64,6 +64,7 @@ pub struct AccessibilityReport {
 pub struct WindowingReport {
     pub gnome_shell_introspect: Check,
     pub codex_gnome_shell_extension: Check,
+    pub kwin: Check,
     pub hyprland: Check,
     pub can_list_windows: bool,
     pub can_focus_apps: bool,
@@ -356,9 +357,10 @@ fn windowing_report() -> WindowingReport {
         "com.openai.Codex.WindowControl.ListWindows",
         &[],
     );
+    let kwin = kwin_windowing_check();
     let hyprland = hyprland_windowing_check();
     let can_list_windows =
-        gnome_shell_introspect.ok || codex_gnome_shell_extension.ok || hyprland.ok;
+        gnome_shell_introspect.ok || codex_gnome_shell_extension.ok || kwin.ok || hyprland.ok;
     let gnome_focus_apps = gdbus_introspect_contains(
         "org.gnome.Shell",
         "/org/gnome/Shell",
@@ -366,28 +368,51 @@ fn windowing_report() -> WindowingReport {
         "FocusApp",
     )
     .ok;
-    let can_focus_apps = gnome_focus_apps || hyprland.ok;
-    let can_focus_windows = codex_gnome_shell_extension.ok || hyprland.ok;
+    let can_focus_apps = gnome_focus_apps || kwin.ok || hyprland.ok;
+    let can_focus_windows = codex_gnome_shell_extension.ok || kwin.ok || hyprland.ok;
     let note = if can_list_windows {
-        if hyprland.ok {
+        if kwin.ok {
+            "A KWin/Plasma window backend is available for list_windows, focused_window, and targeted input verification."
+        } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
         } else {
             "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
     } else {
-        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On Hyprland, ensure hyprctl is available in the session."
+        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting and WindowsRunner on the session bus. On Hyprland, ensure hyprctl is available in the session."
     }
     .to_string();
 
     WindowingReport {
         gnome_shell_introspect,
         codex_gnome_shell_extension,
+        kwin,
         hyprland,
         can_list_windows,
         can_focus_apps,
         can_focus_windows,
         note,
     }
+}
+
+fn kwin_windowing_check() -> Check {
+    let scripting = gdbus_introspect_contains(
+        "org.kde.KWin",
+        "/Scripting",
+        "org.kde.kwin.Scripting",
+        "loadScript",
+    );
+    if !scripting.ok {
+        return Check::fail(format!("KWin scripting unavailable: {}", scripting.detail));
+    }
+
+    let runner =
+        gdbus_introspect_contains("org.kde.KWin", "/WindowsRunner", "org.kde.krunner1", "Run");
+    if !runner.ok {
+        return Check::fail(format!("KWin WindowsRunner unavailable: {}", runner.detail));
+    }
+
+    Check::ok("KWin scripting and WindowsRunner are available on the session bus")
 }
 
 fn hyprland_windowing_check() -> Check {
@@ -474,7 +499,7 @@ fn readiness_report(
         "Run setup_accessibility to enable GNOME accessibility before element-aware actions."
             .to_string()
     } else if !can_query_windows {
-        "Enable a supported window backend before using targeted keyboard input: GNOME Shell Introspect, the Codex GNOME Shell extension, or Hyprland hyprctl.".to_string()
+        "Enable a supported window backend before using targeted keyboard input: GNOME Shell Introspect, the Codex GNOME Shell extension, KWin/Plasma DBus scripting, or Hyprland hyprctl.".to_string()
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
@@ -707,6 +732,7 @@ mod tests {
             } else {
                 Check::fail("missing")
             },
+            kwin: Check::fail("not a KWin session"),
             hyprland: Check::fail("not a Hyprland session"),
             can_list_windows,
             can_focus_apps: true,
@@ -785,6 +811,24 @@ mod tests {
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Exact window activation")));
+    }
+
+    #[test]
+    fn readiness_treats_kwin_as_full_window_backend() {
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(false, false);
+        windowing.kwin = Check::ok("KWin scripting and WindowsRunner are available");
+        windowing.can_list_windows = true;
+        windowing.can_focus_apps = true;
+        windowing.can_focus_windows = true;
+        let input = input_report(true);
+
+        let readiness = readiness_report(&accessibility, &windowing, &input);
+
+        assert!(readiness.can_query_windows);
+        assert!(readiness.can_focus_apps);
+        assert!(readiness.can_focus_windows);
+        assert!(readiness.blockers.is_empty());
     }
 
     #[test]

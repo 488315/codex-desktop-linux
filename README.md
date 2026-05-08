@@ -27,7 +27,7 @@ Anything systemd-based should work for the optional auto-updater service (`syste
 | Linux tray + warm-start handoff | ✅ always | Single-instance lock, second-instance window focus |
 | GUI install prompts (`kdialog` / `zenity`) | ✅ if installed | Falls back to interactive terminal prompt |
 | Linux browser annotations | ✅ always | Stored-anchor screenshots, isolated marker rendering |
-| Linux Computer Use | ⚠️ opt-in | Linux Computer Use backend with screen capture, accessibility, and input synthesis. The MCP server registers by default; the in-app UI surface is enabled at your discretion — see "Enabling Computer Use UI" below. Validated on Ubuntu/GNOME. |
+| Linux Computer Use | ⚠️ opt-in | Linux Computer Use backend with screen capture, accessibility, window targeting, and input synthesis. The MCP server registers by default; the in-app UI surface is enabled at your discretion — see "Enabling Computer Use UI" below. Validated on Ubuntu/GNOME and KDE Plasma/KWin. |
 | Server-gated features (e.g. `gpt-5.5`) | 🟡 server-side | OpenAI rolls per-account, not project-controlled. Building a fresh package does not unlock these. |
 
 ## Before you install
@@ -84,6 +84,7 @@ Linux Computer Use is an **opt-in** plugin that lets Codex inspect and control d
 
 - **App listing & accessibility tree** — via AT-SPI bus (`org.a11y.Bus`)
 - **Screenshot capture** — primary path through GNOME Shell DBus, fallback through XDG Desktop Portal (`org.freedesktop.portal.Screenshot`)
+- **Window listing & focusing** — via the Codex GNOME Shell extension, GNOME Shell introspection, KWin/Plasma DBus scripting, or Hyprland `hyprctl`
 - **Input synthesis** — keys, text, click, scroll, drag — through `ydotool` with `ydotoold` daemon
 
 ### Runtime dependencies
@@ -121,12 +122,13 @@ The plugin exposes a `doctor` tool. Once Computer Use is visible in the Codex UI
 
 > Check whether Linux Computer Use is ready
 
-The response is a structured report covering AT-SPI bus availability, GNOME Shell version, Desktop Portal interfaces, `ydotool` / `ydotoold` / `/dev/uinput`, and a top-level readiness verdict. You can also invoke the backend binary directly:
+The response is a structured report covering AT-SPI bus availability, GNOME Shell version, KWin/Plasma windowing support, Desktop Portal interfaces, `ydotool` / `ydotoold` / `/dev/uinput`, and a top-level readiness verdict. You can also invoke the backend binary directly:
 
 ```bash
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux doctor
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux setup    # enables GNOME accessibility
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux apps     # lists running apps via AT-SPI
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux windows  # lists targetable windows
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux state Codex
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux screenshot
 ```

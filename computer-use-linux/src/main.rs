@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
                 Err(error) => {
                     let error = format!("{error:#}");
                     serde_json::json!({
-                        "backend": windows::GNOME_SHELL_INTROSPECT_BACKEND,
+                        "backend": "unavailable",
                         "windows": [],
                         "error": error,
                         "permissions_hint": windows::window_permission_hint(&error),
