@@ -528,6 +528,7 @@ find_codex_cli() {
 
     local candidate
     for candidate in \
+        "$HOME/.bun/bin/codex" \
         "$HOME/.nvm/versions/node/current/bin/codex" \
         "$HOME/.nvm/versions/node"/*/bin/codex \
         "$HOME/.local/share/pnpm/codex" \
