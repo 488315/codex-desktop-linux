@@ -525,6 +525,90 @@ if 'clear_stale_pid_file' not in reconcile_body:
 if 'if [ -z "$webview_pid" ] || { ! pid_is_webview_server "$webview_pid" && ! pid_is_stale_webview_server "$webview_pid"; }; then' not in reconcile_body:
     raise SystemExit("reconcile_runtime_state must clear stale launcher webview ownership markers without touching valid orphaned servers")
 PY
+    local launcher_probe
+    local output
+    launcher_probe="$TMP_DIR/launcher-rendering-probe.sh"
+    python3 - "$REPO_DIR/launcher/start.sh.template" "$launcher_probe" <<'PY'
+import sys
+
+source_path, output_path = sys.argv[1:3]
+source = open(source_path, encoding="utf-8").read()
+start = source.index("is_wsl_environment() {")
+end = source.index("configure_side_by_side_app_env() {")
+probe = "#!/bin/bash\n" + source[start:end] + r'''
+set -Eeuo pipefail
+
+CODEX_LINUX_APP_ID="${CODEX_LINUX_APP_ID:-codex-desktop}"
+APP_STATE_DIR="${APP_STATE_DIR:-/tmp/codex-launcher-probe-state}"
+
+print_state() {
+    printf 'mode=%s wslg=%s ozone_platform=%s ozone_hint=%s gpu=%s gpu_arg=%s comp=%s gl_added=%s launch=' \
+        "$ELECTRON_RENDERING_MODE" \
+        "$ELECTRON_WSLG_DETECTED" \
+        "${ELECTRON_OZONE_PLATFORM:-}" \
+        "${ELECTRON_OZONE_HINT:-}" \
+        "$ELECTRON_GPU_ENABLED" \
+        "$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS" \
+        "$ELECTRON_GPU_COMPOSITING_DISABLED" \
+        "$ELECTRON_GL_SWITCH_ADDED"
+    for arg in "${ELECTRON_LAUNCH_ARGS[@]}"; do
+        printf '<%s>' "$arg"
+    done
+    printf ' electron='
+    for arg in "${ELECTRON_ARGS[@]}"; do
+        printf '<%s>' "$arg"
+    done
+    printf '\n'
+}
+
+case "${1:-}" in
+    probe)
+        shift
+        set_electron_defaults "$@"
+        build_electron_launch_args
+        print_state
+        ;;
+    *)
+        echo "Usage: $0 probe [launcher args...]" >&2
+        exit 2
+        ;;
+esac
+'''
+open(output_path, "w", encoding="utf-8").write(probe)
+PY
+    chmod +x "$launcher_probe"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe --x11 -- --use-gl=angle)"
+    [[ "$output" == *"electron=<--use-gl=angle>"* ]] || fail "launcher must pass Electron args after -- without the separator: $output"
+    [[ "$output" != *"electron=<--><--use-gl=angle>"* ]] || fail "launcher must not pass the -- separator to Electron: $output"
+    [[ "$output" == *"<--ozone-platform=x11>"* ]] || fail "launcher --x11 must still set the Electron ozone platform: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe -- --ozone-platform=x11)"
+    [[ "$output" == *"electron=<--ozone-platform=x11>"* ]] || fail "pass-through ozone platform must reach Electron: $output"
+    [[ "$output" != *"<--ozone-platform-hint=auto>"* ]] || fail "launcher must not add ozone hint when pass-through supplies an ozone platform: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe)"
+    [[ "$output" == *"mode=wslg"* && "$output" == *"comp=0"* && "$output" == *"gl_added=1"* ]] || fail "forced WSLg profile must disable GPU compositing default and add ANGLE: $output"
+    [[ "$output" == *"<--ozone-platform=x11>"* && "$output" == *"electron=<--use-gl=angle>"* ]] || fail "forced WSLg profile must use X11 and ANGLE by default: $output"
+    [[ "$output" != *"<--disable-gpu-compositing>"* ]] || fail "forced WSLg profile must not add disable-gpu-compositing by default: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe --wayland --use-gl=desktop)"
+    [[ "$output" == *"<--ozone-platform=wayland>"* && "$output" == *"electron=<--use-gl=desktop>"* ]] || fail "explicit rendering args must override WSLg defaults: $output"
+    [[ "$output" == *"gl_added=0"* && "$output" != *"<--use-gl=angle>"* ]] || fail "WSLg profile must not add ANGLE when a GL switch was supplied: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg "$launcher_probe" probe -- --disable-gpu)"
+    [[ "$output" == *"gpu=1"* && "$output" == *"gpu_arg=1"* && "$output" == *"gl_added=0"* ]] || fail "pass-through --disable-gpu must suppress WSLg ANGLE without becoming a launcher GPU toggle: $output"
+    [[ "$output" == *"electron=<--disable-gpu>"* && "$output" != *"<--disable-features=Vulkan>"* ]] || fail "pass-through --disable-gpu must not add launcher-only Vulkan flags: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=wslg CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1 "$launcher_probe" probe)"
+    [[ "$output" == *"comp=1"* && "$output" == *"<--disable-gpu-compositing>"* ]] || fail "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=1 must force the compositor flag: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 "$launcher_probe" probe)"
+    [[ "$output" == *"comp=0"* && "$output" != *"<--disable-gpu-compositing>"* ]] || fail "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 must suppress the compositor flag: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" WSL_INTEROP=/tmp/codex-wsl WAYLAND_DISPLAY=wayland-0 "$launcher_probe" probe)"
+    [[ "$output" == *"mode=wslg"* && "$output" == *"wslg=1"* ]] || fail "auto rendering mode must detect WSLg from WSL and GUI markers: $output"
+
     assert_contains "$REPO_DIR/launcher/start.sh.template" "warm_start_ipc_sent"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "launcher_phase"
     assert_contains "$REPO_DIR/launcher/start.sh.template" 'date +%s%N'

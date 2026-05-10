@@ -75,6 +75,12 @@ Options:
 Default launch keeps Electron GPU enabled and lets Electron choose the platform.
 Extra flags are passed directly to Electron.
 
+Environment:
+  CODEX_LINUX_RENDERING_MODE=auto|default|wslg
+                              Auto-detect WSLg, keep generic Linux defaults, or force the WSLg profile
+  CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0|1
+                              Override the launcher's default --disable-gpu-compositing decision
+
 Logs: ${XDG_CACHE_HOME:-$HOME/.cache}/$CODEX_LINUX_APP_ID/launcher.log
 HELP
     exit 0
@@ -1300,18 +1306,155 @@ reconcile_runtime_state() {
     fi
 }
 
+is_wsl_environment() {
+    if [ -n "${WSL_INTEROP:-}" ] || [ -n "${WSL_DISTRO_NAME:-}" ]; then
+        return 0
+    fi
+
+    grep -qiE "(microsoft|wsl)" /proc/sys/kernel/osrelease 2>/dev/null
+}
+
+is_wslg_session() {
+    is_wsl_environment || return 1
+
+    if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        return 0
+    fi
+
+    [ -n "${DISPLAY:-}" ] && [ -e /mnt/wslg ]
+}
+
+normalize_linux_rendering_mode() {
+    case "${CODEX_LINUX_RENDERING_MODE:-auto}" in
+        auto|default|wslg)
+            echo "${CODEX_LINUX_RENDERING_MODE:-auto}"
+            ;;
+        *)
+            echo "Invalid CODEX_LINUX_RENDERING_MODE='${CODEX_LINUX_RENDERING_MODE:-}'; using auto" >&2
+            echo "auto"
+            ;;
+    esac
+}
+
+truthy_env_value() {
+    case "${1:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+falsey_env_value() {
+    case "${1:-}" in
+        0|false|FALSE|no|NO|off|OFF) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+scan_electron_rendering_arg() {
+    case "$1" in
+        --ozone-platform|--ozone-platform=*|--ozone-platform-hint|--ozone-platform-hint=*)
+            ELECTRON_OZONE_SWITCH_IN_ARGS=1
+            ;;
+        --use-gl|--use-gl=*|--use-angle|--use-angle=*)
+            ELECTRON_GL_SWITCH_PROVIDED=1
+            ;;
+        --disable-gpu|--disable-gpu=*)
+            ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS=1
+            ;;
+        --disable-gpu-compositing|--disable-gpu-compositing=*)
+            ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED=1
+            ;;
+    esac
+}
+
+apply_electron_rendering_profile() {
+    local requested_mode
+    requested_mode="$(normalize_linux_rendering_mode)"
+
+    ELECTRON_RENDERING_MODE="$requested_mode"
+    ELECTRON_WSLG_DETECTED=0
+    if is_wslg_session; then
+        ELECTRON_WSLG_DETECTED=1
+    fi
+
+    case "$requested_mode" in
+        auto)
+            if [ "$ELECTRON_WSLG_DETECTED" -eq 1 ]; then
+                ELECTRON_RENDERING_MODE="wslg"
+            else
+                ELECTRON_RENDERING_MODE="default"
+            fi
+            ;;
+        default)
+            return 0
+            ;;
+    esac
+
+    [ "$ELECTRON_RENDERING_MODE" = "wslg" ] || return 0
+
+    if [ "$ELECTRON_PLATFORM_EXPLICIT" -eq 0 ] && [ "$ELECTRON_OZONE_SWITCH_IN_ARGS" -eq 0 ]; then
+        ELECTRON_OZONE_PLATFORM="x11"
+        ELECTRON_OZONE_HINT=""
+    fi
+
+    if [ "$ELECTRON_GL_SWITCH_PROVIDED" -eq 0 ] && [ "$ELECTRON_GPU_ENABLED" = "1" ] && [ "$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS" -eq 0 ]; then
+        ELECTRON_ARGS+=(--use-gl=angle)
+        ELECTRON_GL_SWITCH_PROVIDED=1
+        ELECTRON_GL_SWITCH_ADDED=1
+    fi
+}
+
+should_disable_gpu_compositing() {
+    if [ "$ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED" -eq 1 ]; then
+        return 0
+    fi
+
+    if [ -n "${CODEX_ELECTRON_DISABLE_GPU_COMPOSITING:-}" ]; then
+        if truthy_env_value "$CODEX_ELECTRON_DISABLE_GPU_COMPOSITING"; then
+            return 0
+        fi
+        if falsey_env_value "$CODEX_ELECTRON_DISABLE_GPU_COMPOSITING"; then
+            return 1
+        fi
+        echo "Invalid CODEX_ELECTRON_DISABLE_GPU_COMPOSITING='${CODEX_ELECTRON_DISABLE_GPU_COMPOSITING:-}'; using rendering profile default" >&2
+    fi
+
+    [ "$ELECTRON_RENDERING_MODE" != "wslg" ]
+}
+
 set_electron_defaults() {
     ELECTRON_OZONE_PLATFORM=""
     ELECTRON_OZONE_HINT="auto"
     ELECTRON_GPU_ENABLED=1
+    ELECTRON_RENDERING_MODE="default"
+    ELECTRON_WSLG_DETECTED=0
+    ELECTRON_PLATFORM_EXPLICIT=0
+    ELECTRON_OZONE_SWITCH_IN_ARGS=0
+    ELECTRON_GL_SWITCH_PROVIDED=0
+    ELECTRON_GL_SWITCH_ADDED=0
+    ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS=0
+    ELECTRON_GPU_COMPOSITING_DISABLED=0
+    ELECTRON_GPU_COMPOSITING_SWITCH_PROVIDED=0
     ELECTRON_ARGS=()
+    local passthrough=0
 
     while [ "$#" -gt 0 ]; do
+        if [ "$passthrough" -eq 1 ]; then
+            ELECTRON_ARGS+=("$1")
+            scan_electron_rendering_arg "$1"
+            shift
+            continue
+        fi
+
         case "$1" in
+            --)
+                passthrough=1
+                ;;
             --safe-mode)
                 ELECTRON_OZONE_PLATFORM="x11"
                 ELECTRON_OZONE_HINT=""
                 ELECTRON_GPU_ENABLED=0
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --disable-gpu)
                 ELECTRON_GPU_ENABLED=0
@@ -1322,21 +1465,26 @@ set_electron_defaults() {
             --x11)
                 ELECTRON_OZONE_PLATFORM="x11"
                 ELECTRON_OZONE_HINT=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --wayland)
                 ELECTRON_OZONE_PLATFORM="wayland"
                 ELECTRON_OZONE_HINT=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --ozone-platform=*)
                 ELECTRON_OZONE_PLATFORM="${1#--ozone-platform=}"
                 ELECTRON_OZONE_HINT=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             --ozone-platform-hint=*)
                 ELECTRON_OZONE_HINT="${1#--ozone-platform-hint=}"
                 ELECTRON_OZONE_PLATFORM=""
+                ELECTRON_PLATFORM_EXPLICIT=1
                 ;;
             *)
                 ELECTRON_ARGS+=("$1")
+                scan_electron_rendering_arg "$1"
                 ;;
         esac
         shift
@@ -1362,6 +1510,8 @@ set_electron_defaults() {
         ELECTRON_OZONE_HINT=""
         echo "Detected Sommelier (SOMMELIER_VERSION=$SOMMELIER_VERSION); forcing --ozone-platform=x11 (Wayland windows are not visible under ChromeOS Crostini)"
     fi
+
+    apply_electron_rendering_profile
 }
 
 build_electron_launch_args() {
@@ -1371,8 +1521,14 @@ build_electron_launch_args() {
         --app-id="$CODEX_LINUX_APP_ID"
         --disable-dev-shm-usage
         --disable-gpu-sandbox
-        --disable-gpu-compositing
     )
+
+    if should_disable_gpu_compositing; then
+        ELECTRON_LAUNCH_ARGS+=(--disable-gpu-compositing)
+        ELECTRON_GPU_COMPOSITING_DISABLED=1
+    else
+        ELECTRON_GPU_COMPOSITING_DISABLED=0
+    fi
 
     if [ "$CODEX_LINUX_APP_ID" != "codex-desktop" ]; then
         ELECTRON_LAUNCH_ARGS+=(--user-data-dir="${CODEX_ELECTRON_USER_DATA_DIR:-$APP_STATE_DIR/electron-user-data}")
@@ -1382,7 +1538,7 @@ build_electron_launch_args() {
 
     if [ -n "$ELECTRON_OZONE_PLATFORM" ]; then
         ELECTRON_LAUNCH_ARGS+=(--ozone-platform="$ELECTRON_OZONE_PLATFORM")
-    elif [ -n "$ELECTRON_OZONE_HINT" ]; then
+    elif [ -n "$ELECTRON_OZONE_HINT" ] && [ "$ELECTRON_OZONE_SWITCH_IN_ARGS" -eq 0 ]; then
         ELECTRON_LAUNCH_ARGS+=(--ozone-platform-hint="$ELECTRON_OZONE_HINT")
     fi
 
@@ -1432,12 +1588,12 @@ launch_electron() {
     build_electron_launch_args
 
     if [ "$WARM_START" -eq 1 ]; then
-        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED"
+        echo "Electron warm-start handoff: pid=$RUNNING_APP_PID rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED"
         "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}"
         return $?
     fi
 
-    echo "Electron launch mode: ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED"
+    echo "Electron launch mode: rendering_mode=$ELECTRON_RENDERING_MODE wslg_detected=$ELECTRON_WSLG_DETECTED ozone_platform=${ELECTRON_OZONE_PLATFORM:-default} ozone_hint=${ELECTRON_OZONE_HINT:-none} gpu_enabled=$ELECTRON_GPU_ENABLED gpu_disable_arg=$ELECTRON_GPU_DISABLE_SWITCH_IN_ARGS gpu_compositing_disabled=$ELECTRON_GPU_COMPOSITING_DISABLED gl_switch_added=$ELECTRON_GL_SWITCH_ADDED"
     "$SCRIPT_DIR/electron" "${ELECTRON_LAUNCH_ARGS[@]}" "${ELECTRON_ARGS[@]}" &
     ELECTRON_PID=$!
     if [ -n "${RUNNING_APP_PID:-}" ] && pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron"; then
