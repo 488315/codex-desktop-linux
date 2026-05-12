@@ -723,9 +723,11 @@ run_cli_preflight() {
 
     local -a preflight_args=(
         cli-preflight
-        --cli-path "$CODEX_CLI_PATH"
         --print-path
     )
+    if [ -n "${CODEX_CLI_PATH:-}" ]; then
+        preflight_args+=(--cli-path "$CODEX_CLI_PATH")
+    fi
     if [ "$allow_install_missing" = "1" ]; then
         preflight_args+=(--allow-install-missing)
     fi
@@ -751,7 +753,11 @@ run_cli_preflight_background() {
     fi
 
     (
-        if ! run_update_manager cli-preflight --cli-path "$CODEX_CLI_PATH" --print-path >/dev/null 2>&1; then
+        local -a args=(cli-preflight --print-path)
+        if [ -n "${CODEX_CLI_PATH:-}" ]; then
+            args+=(--cli-path "$CODEX_CLI_PATH")
+        fi
+        if ! run_update_manager "${args[@]}" >/dev/null 2>&1; then
             echo "Codex CLI background preflight failed. Continuing with the current CLI."
         fi
     ) &
@@ -767,7 +773,11 @@ run_gui_cli_prompt() {
     fi
 
     local refreshed_path=""
-    if ! refreshed_path="$(run_update_manager prompt-install-cli --cli-path "$CODEX_CLI_PATH" --print-path)"; then
+    local -a args=(prompt-install-cli --print-path)
+    if [ -n "${CODEX_CLI_PATH:-}" ]; then
+        args+=(--cli-path "$CODEX_CLI_PATH")
+    fi
+    if ! refreshed_path="$(run_update_manager "${args[@]}")"; then
         return 1
     fi
 
