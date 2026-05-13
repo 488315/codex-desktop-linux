@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     env,
     io::Write,
-    os::unix::net::UnixStream,
+    os::unix::net::{UnixDatagram, UnixStream},
     path::PathBuf,
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
@@ -1925,7 +1925,14 @@ fn ydotool_socket_candidates() -> Vec<PathBuf> {
 fn connectable_ydotool_socket_from(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     candidates
         .into_iter()
-        .find(|path| UnixStream::connect(path).is_ok())
+        .find(|path| ydotool_socket_connects(path))
+}
+
+fn ydotool_socket_connects(path: &PathBuf) -> bool {
+    UnixStream::connect(path).is_ok()
+        || UnixDatagram::unbound()
+            .and_then(|socket| socket.connect(path))
+            .is_ok()
 }
 
 fn mouse_button_code(button: Option<&str>) -> String {
@@ -2695,6 +2702,28 @@ mod tests {
 
         assert_eq!(selected, usable_socket);
         drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ydotool_socket_selection_accepts_datagram_socket() {
+        let dir = std::env::temp_dir().join(format!(
+            "codex-computer-use-server-dgram-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp server dir");
+        let stale_socket = dir.join("stale.sock");
+        std::fs::write(&stale_socket, b"not a socket").expect("write stale socket placeholder");
+        let usable_socket = dir.join("usable.sock");
+        let datagram =
+            std::os::unix::net::UnixDatagram::bind(&usable_socket).expect("bind usable socket");
+
+        let selected = connectable_ydotool_socket_from(vec![stale_socket, usable_socket.clone()])
+            .expect("usable socket should be selected");
+
+        assert_eq!(selected, usable_socket);
+        drop(datagram);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
