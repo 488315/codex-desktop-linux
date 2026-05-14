@@ -270,6 +270,7 @@ run_deb_job() {
     assert_contains_file /tmp/deb-contents.txt './usr/bin/codex-update-manager'
     assert_contains_file /tmp/deb-contents.txt './usr/lib/systemd/user/codex-update-manager.service'
     assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/install.sh'
+    assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/update-builder/launcher/webview-server.py'
     assert_contains_file /tmp/deb-contents.txt './opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
 
     append_summary "Debian Package Validation" \
@@ -296,6 +297,7 @@ run_rpm_job() {
     assert_contains_file /tmp/rpm-contents.txt '/usr/bin/codex-update-manager'
     assert_contains_file /tmp/rpm-contents.txt '/usr/lib/systemd/user/codex-update-manager.service'
     assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/install.sh'
+    assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/update-builder/launcher/webview-server.py'
     assert_contains_file /tmp/rpm-contents.txt '/opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
 
     append_summary "RPM Package Validation" \
@@ -323,6 +325,7 @@ run_pacman_job() {
     assert_contains_file /tmp/pacman-contents.txt 'usr/bin/codex-update-manager'
     assert_contains_file /tmp/pacman-contents.txt 'usr/lib/systemd/user/codex-update-manager.service'
     assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/install.sh'
+    assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/update-builder/launcher/webview-server.py'
     assert_contains_file /tmp/pacman-contents.txt 'opt/codex-desktop/.codex-linux/codex-packaged-runtime.sh'
 
     append_summary "Pacman Package Validation" \
