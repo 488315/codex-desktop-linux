@@ -588,6 +588,8 @@ test_make_build_app_uses_installer_download_flow_by_default() {
     info "Checking make build-app default DMG behavior"
     local workspace="$TMP_DIR/make-build-app"
     local install_log="$workspace/install-args.log"
+    local first_line
+    local second_line
 
     mkdir -p "$workspace"
 
@@ -608,6 +610,37 @@ SCRIPT
     second_line="$(sed -n '2p' "$install_log")"
     [ "$first_line" = "1" ] || fail "Expected make build-app to call install.sh with a single default argument slot, got: $(cat "$install_log")"
     [ -z "$second_line" ] || fail "Expected make build-app default DMG argument to be empty so install.sh falls back to reuse/download, got: $(cat "$install_log")"
+}
+
+test_make_build_app_fresh_uses_installer_fresh_flow() {
+    info "Checking make build-app-fresh DMG behavior"
+    local workspace="$TMP_DIR/make-build-app-fresh"
+    local install_log="$workspace/install-args.log"
+    local first_line
+    local second_line
+    local third_line
+
+    mkdir -p "$workspace"
+
+    cat > "$workspace/install.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$#" > "$TEST_INSTALL_LOG"
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> "$TEST_INSTALL_LOG"
+done
+SCRIPT
+    chmod +x "$workspace/install.sh"
+
+    TEST_INSTALL_LOG="$install_log" make -f "$REPO_DIR/Makefile" -C "$workspace" build-app-fresh >/dev/null
+
+    assert_file_exists "$install_log"
+    first_line="$(sed -n '1p' "$install_log")"
+    second_line="$(sed -n '2p' "$install_log")"
+    third_line="$(sed -n '3p' "$install_log")"
+    [ "$first_line" = "2" ] || fail "Expected make build-app-fresh to pass --fresh plus the default argument slot, got: $(cat "$install_log")"
+    [ "$second_line" = "--fresh" ] || fail "Expected make build-app-fresh to pass --fresh first, got: $(cat "$install_log")"
+    [ -z "$third_line" ] || fail "Expected make build-app-fresh default DMG argument to be empty, got: $(cat "$install_log")"
 }
 
 test_upstream_build_app_workflow_tracks_dmg_metadata() {
@@ -2715,6 +2748,7 @@ main() {
     test_appimage_builder_smoke
     test_missing_input_failure
     test_make_build_app_uses_installer_download_flow_by_default
+    test_make_build_app_fresh_uses_installer_fresh_flow
     test_upstream_build_app_workflow_tracks_dmg_metadata
     test_installer_detects_electron_version_from_plist
     test_installer_keeps_electron_fallback_for_bad_metadata

@@ -86,7 +86,7 @@ The AppImage flow does not include `codex-update-manager`, the systemd user serv
 
 ```bash
 git pull --ff-only
-make build-app
+make build-app-fresh
 make appimage
 ```
 
@@ -246,7 +246,7 @@ Manual updates should come from a checkout you have chosen to trust:
 
 ```bash
 git pull --ff-only
-make build-app
+make build-app-fresh
 PACKAGE_WITH_UPDATER=0 make package
 make install
 ```
@@ -307,7 +307,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 This produces `codex-app/` from the upstream DMG and writes the Linux launcher to `codex-app/start.sh`:
 
 ```bash
-make build-app                              # downloads upstream DMG
+make build-app                              # download upstream DMG if no cached Codex.dmg exists
+make build-app-fresh                        # remove codex-app/ + cached Codex.dmg, then download current upstream DMG
 make build-app DMG=/path/to/Codex.dmg       # use a local copy
 make run-app                                # launches the generated app
 ```
@@ -323,7 +324,7 @@ Equivalent direct commands:
 
 ### Electron download mirrors
 
-`make build-app` downloads Electron headers while rebuilding native modules, then downloads a Linux Electron runtime. If the runtime download from GitHub is slow or blocked, use a mirror:
+The app build commands download Electron headers while rebuilding native modules, then download a Linux Electron runtime. If the runtime download from GitHub is slow or blocked, use a mirror:
 
 ```bash
 ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
@@ -334,7 +335,7 @@ make build-app
 
 ## Package formats
 
-After `make build-app`, build a native package from `codex-app/` with the format you need:
+After `make build-app` or `make build-app-fresh`, build a native package from `codex-app/` with the format you need:
 
 | Format | Build command | Output | Install |
 |---|---|---|---|
@@ -370,6 +371,7 @@ make check
 make test
 make build-updater
 make build-app
+make build-app-fresh
 make run-app
 make build-dev-app
 make run-dev-app
@@ -398,7 +400,7 @@ make clean-state
 | GPU / Vulkan / Wayland errors | Under Wayland with `DISPLAY` available, the launcher uses `--ozone-platform=x11` for window-positioning compatibility. Otherwise it uses `--ozone-platform-hint=auto`. GPU sandbox / compositing are disabled by default |
 | Window flickering | GPU compositing is disabled by default. If flickering persists, try `./codex-app/start.sh --disable-gpu` to fully disable GPU acceleration |
 | Sandbox errors | The launcher already sets `--no-sandbox` |
-| Stale install / cached DMG | `./install.sh --fresh` removes the existing install dir and re-downloads |
+| Stale install / cached DMG | `make build-app-fresh` removes the existing install dir and cached DMG, then re-downloads |
 | Computer Use plugin invisible in UI | Ensure you enabled the Computer Use UI. If it is enabled and still hidden, the OpenAI per-account rollout may not be available |
 | Computer Use `doctor` reports `ydotool not running` | Start the distro-provided daemon unit (`ydotoold` or `ydotool`), or use a user-session `ydotoold` service, then add your user to the `input` group |
 | Computer Use `doctor` reports `ydotool_socket: Permission denied` | The daemon socket is root-only. Adjust the `ydotoold` service so `/tmp/.ydotool_socket` becomes `root:input` with `0660` permissions |
