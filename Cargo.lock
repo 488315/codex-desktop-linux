@@ -483,6 +483,7 @@ dependencies = [
  "futures-util",
  "notify-rust",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

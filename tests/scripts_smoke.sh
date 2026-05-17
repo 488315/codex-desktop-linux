@@ -826,6 +826,75 @@ PLIST
     [ "$(tail -n 1 "$output_log")" = "41.3.0" ] || fail "Expected fallback Electron version 41.3.0, got: $(cat "$output_log")"
 }
 
+test_port_validation_rejects_oversized_numeric_values() {
+    info "Checking oversized numeric webview port validation"
+    local workspace="$TMP_DIR/port-validation"
+    local install_stdout="$workspace/install.stdout"
+    local install_stderr="$workspace/install.stderr"
+    local launcher_stdout="$workspace/launcher.stdout"
+    local launcher_stderr="$workspace/launcher.stderr"
+    local canonical_stdout="$workspace/canonical.stdout"
+    local canonical_stderr="$workspace/canonical.stderr"
+    local launcher_probe_script="$workspace/launcher-port-probe.sh"
+    local start_script="$workspace/start.sh"
+    local huge_port="999999999999999999999999"
+    local rc
+
+    mkdir -p "$workspace"
+
+    set +e
+    CODEX_INSTALLER_SOURCE_ONLY=1 CODEX_WEBVIEW_PORT="$huge_port" bash -c \
+        'source "$1"; validate_app_identity' \
+        _ "$REPO_DIR/install.sh" >"$install_stdout" 2>"$install_stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "Expected installer validation to reject oversized CODEX_WEBVIEW_PORT"
+    assert_contains "$install_stderr" "CODEX_WEBVIEW_PORT must be between 1 and 65535"
+    assert_not_contains "$install_stderr" "integer expected"
+
+    CODEX_INSTALLER_SOURCE_ONLY=1 CODEX_WEBVIEW_PORT=00080 bash -c \
+        'source "$1"; validate_app_identity; printf "%s\n" "$CODEX_WEBVIEW_PORT"' \
+        _ "$REPO_DIR/install.sh" >"$canonical_stdout" 2>"$canonical_stderr"
+    [ "$(cat "$canonical_stdout")" = "80" ] || fail "Expected installer validation to canonicalize leading-zero CODEX_WEBVIEW_PORT"
+    [ ! -s "$canonical_stderr" ] || fail "Expected installer leading-zero canonicalization to be quiet, got: $(cat "$canonical_stderr")"
+
+    cat > "$start_script" <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+CODEX_LINUX_APP_ID=codex-desktop
+CODEX_LINUX_APP_DISPLAY_NAME=Codex
+CODEX_LINUX_WEBVIEW_PORT=${CODEX_WEBVIEW_PORT:-5175}
+SCRIPT
+    cat "$REPO_DIR/launcher/start.sh.template" >> "$start_script"
+    chmod +x "$start_script"
+
+    set +e
+    CODEX_WEBVIEW_PORT="$huge_port" "$start_script" --help >"$launcher_stdout" 2>"$launcher_stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "Expected launcher validation to reject oversized CODEX_WEBVIEW_PORT"
+    assert_contains "$launcher_stderr" "CODEX_WEBVIEW_PORT must be between 1 and 65535"
+    assert_not_contains "$launcher_stderr" "integer expected"
+
+    cat > "$launcher_probe_script" <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+CODEX_LINUX_WEBVIEW_PORT=${CODEX_WEBVIEW_PORT:-5175}
+SCRIPT
+    awk '
+        /^case "\$CODEX_LINUX_WEBVIEW_PORT" in/ { emit = 1 }
+        emit { print }
+        /^WEBVIEW_ORIGIN=/ { exit }
+    ' "$REPO_DIR/launcher/start.sh.template" >> "$launcher_probe_script"
+    cat >> "$launcher_probe_script" <<'SCRIPT'
+printf '%s\n' "$CODEX_LINUX_WEBVIEW_PORT"
+SCRIPT
+    chmod +x "$launcher_probe_script"
+    CODEX_WEBVIEW_PORT=00080 "$launcher_probe_script" >"$launcher_stdout" 2>"$launcher_stderr"
+    [ "$(tail -n 1 "$launcher_stdout")" = "80" ] || fail "Expected launcher validation to canonicalize leading-zero CODEX_WEBVIEW_PORT"
+    [ ! -s "$launcher_stderr" ] || fail "Expected launcher leading-zero canonicalization to be quiet, got: $(cat "$launcher_stderr")"
+}
+
 test_managed_node_runtime_source_install() {
     info "Checking managed Node.js runtime source install"
     local workspace="$TMP_DIR/managed-node-runtime"
@@ -3384,6 +3453,7 @@ main() {
     test_upstream_build_app_workflow_tracks_dmg_metadata
     test_installer_detects_electron_version_from_plist
     test_installer_keeps_electron_fallback_for_bad_metadata
+    test_port_validation_rejects_oversized_numeric_values
     test_managed_node_runtime_source_install
     test_better_sqlite3_electron_42_source_patch
     test_native_module_rebuild_uses_local_electron_rebuild_toolchain

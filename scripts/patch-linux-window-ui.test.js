@@ -398,6 +398,13 @@ function keybindsIndexBundleFixture() {
   ].join("");
 }
 
+function keybindsIndexBundleWithLazyAliasDriftFixture() {
+  return keybindsIndexBundleFixture().replaceAll(
+    "(0,Z.lazy)(()=>s(",
+    "(0,R.lazy)(()=>q(",
+  );
+}
+
 function appSunsetBundleFixture() {
   return [
     "function IT(){return null}",
@@ -1021,6 +1028,19 @@ test("adds Keybinds settings route after upstream minified variable drift", () =
   assert.match(patched, /case`keybinds`:return l===`electron`/);
   assert.match(patched, /case`keybinds`:k=!1;break bb0;/);
   assert.match(patched, /codexLinuxKeybindOverridesRuntime/);
+});
+
+test("adds Keybinds settings route with current lazy and preload aliases", () => {
+  const patched = applyPatchTwice(
+    applyKeybindsSettingsIndexPatch,
+    keybindsIndexBundleWithLazyAliasDriftFixture(),
+  );
+
+  assert.match(
+    patched,
+    /var i_e=\{keybinds:\(0,R\.lazy\)\(\(\)=>q\(\(\)=>import\(`\.\/keybinds-settings-linux\.js`\)/,
+  );
+  assert.doesNotMatch(patched, /keybinds:\(0,Z\.lazy\)\(\(\)=>s\(/);
 });
 
 test("disables the upstream app sunset gate in the Linux wrapper webview", () => {
