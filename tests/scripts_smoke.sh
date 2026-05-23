@@ -881,6 +881,25 @@ test_native_shortcut_targets_compose_existing_flows() {
     assert_contains "$setup_log" 'bash scripts/bootstrap-wizard.sh'
 }
 
+test_fedora_dependency_bootstrap_installs_rpmbuild() {
+    info "Checking Fedora dependency bootstrap includes rpmbuild"
+    local install_deps="$REPO_DIR/scripts/install-deps.sh"
+    local helper="$REPO_DIR/scripts/lib/install-helpers.sh"
+    local readme="$REPO_DIR/README.md"
+
+    awk '/^install_dnf5\(\) \{/,/^}/' "$install_deps" | grep -q -- "rpm-build" \
+        || fail "install_dnf5 must install rpm-build for rpmbuild"
+    awk '/^install_dnf\(\) \{/,/^}/' "$install_deps" | grep -q -- "rpm-build" \
+        || fail "install_dnf must install rpm-build for rpmbuild"
+
+    assert_contains "$install_deps" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
+    assert_contains "$install_deps" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build"
+    assert_contains "$helper" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
+    assert_contains "$helper" "sudo dnf install nodejs npm python3 p7zip p7zip-plugins curl unzip rpm-build"
+    assert_contains "$readme" "sudo dnf install python3 7zip curl unzip rpm-build @development-tools"
+    assert_contains "$readme" "sudo dnf install python3 p7zip p7zip-plugins curl unzip rpm-build"
+}
+
 test_setup_native_wizard_noninteractive_feature_writer() {
     info "Checking setup-native wizard non-interactive feature writer"
     local workspace="$TMP_DIR/setup-native-writer"
@@ -4558,6 +4577,7 @@ main() {
     test_make_build_app_uses_installer_download_flow_by_default
     test_make_build_app_fresh_uses_installer_fresh_flow
     test_native_shortcut_targets_compose_existing_flows
+    test_fedora_dependency_bootstrap_installs_rpmbuild
     test_setup_native_wizard_noninteractive_feature_writer
     test_setup_native_wizard_rejects_invalid_feature_ids
     test_setup_native_wizard_rejects_conflicting_feature_ids
