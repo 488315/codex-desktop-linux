@@ -2096,6 +2096,26 @@ test("adds Linux package updater to current bootstrap updater wiring after callb
   assert.match(patched, /send:e=>M\.sendMessageToAllRegisteredWindows\(e\)/);
 });
 
+test("adds Linux package updater to current bootstrap updater wiring when dispatcher is farther away", () => {
+  const source = [
+    "let n=require(`electron`),i=require(`node:path`),o=require(`node:fs`),u=require(`node:child_process`);",
+    "c({onUpdateReadyChanged:e=>{a.sendMessageToAllRegisteredWindows({type:`app-update-ready-changed`,isUpdateReady:e})}});",
+    "var rK={enabled:!1,running:!1,state:`disabled`};",
+    "async function iK(){",
+    "let{startedAtMs:r,buildFlavor:a,desktopSentry:o,sparkleManager:s,setSparkleBridgeHandlers:c,setSecondInstanceArgsHandler:l}=t.x(),d=t.T.shouldIncludeSparkle(a,process.platform,process.env);",
+    "let M=oG({});let ee=pB(),te=()=>{ee.allowQuitTemporarilyForUpdateInstall(),n.app.quit()};",
+    "c({onInstallProgressChanged:e=>{E&&M.sendMessageToAllRegisteredWindows({type:`app-update-install-progress-changed`,installProgressPercent:e})},onUpdateReadyChanged:e=>{M.sendMessageToAllRegisteredWindows({type:`app-update-ready-changed`,isUpdateReady:e})},onUpdateLifecycleStateChanged:e=>{M.sendMessageToAllRegisteredWindows({type:`app-update-lifecycle-state-changed`,lifecycleState:e})},",
+    "let codexLinuxPadding=`" + "x".repeat(2000) + "`;",
+    "onInstallUpdatesRequested:()=>{te()},isTrustedIpcEvent:N});",
+    "}",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxAppUpdaterBridgePatch, source);
+
+  assert.match(patched, /function codexLinuxCreatePackageUpdateManager\(/);
+  assert.match(patched, /send:e=>M\.sendMessageToAllRegisteredWindows\(e\)/);
+});
+
 test("migrates already-patched bootstrap updater bridge to probe before enabling UI", () => {
   const patched = applyLinuxAppUpdaterBridgePatch(currentBootstrapUpdaterBundleFixture());
   const oldPatched = patched
