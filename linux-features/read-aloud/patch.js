@@ -158,11 +158,20 @@ function applyAssistantRenderPatch(source) {
     return source;
   }
   const jsxCallPattern =
-    /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{item:([A-Za-z_$][\w$]*),([^{}]*?)assistantCopyText:([A-Za-z_$][\w$]*),([^{}]*?)conversationId:([A-Za-z_$][\w$]*),([^{}]*?)renderCodeBlocksAsWritingBlocks:([A-Za-z_$][\w$]*)\}\)/g;
+    /\(0,([A-Za-z_$][\w$]*)\.jsx\)\(([A-Za-z_$][\w$]*),\{(?=[^{}]*\bitem:)(?=[^{}]*\bassistantCopyText:)(?=[^{}]*\bconversationId:)(?=[^{}]*\brenderCodeBlocksAsWritingBlocks:)([^{}]*)\}\)/g;
+  const readProp = (props, name) =>
+    new RegExp(`(?:^|,)${name}:([A-Za-z_$][\\w$]*)`).exec(props)?.[1] ?? null;
   const patched = source.replace(
     jsxCallPattern,
-    (match, jsxVar, _component, itemVar, _beforeCopy, copyVar, _beforeConversation, conversationVar) =>
-      `(0,${jsxVar}.jsxs)(${jsxVar}.Fragment,{children:[${match},${readAloudButtonRowSource(jsxVar, itemVar, copyVar, conversationVar, "e")}]})`,
+    (match, jsxVar, _component, props) => {
+      const itemVar = readProp(props, "item");
+      const copyVar = readProp(props, "assistantCopyText");
+      const conversationVar = readProp(props, "conversationId");
+      if (itemVar == null || copyVar == null || conversationVar == null) {
+        return match;
+      }
+      return `(0,${jsxVar}.jsxs)(${jsxVar}.Fragment,{children:[${match},${readAloudButtonRowSource(jsxVar, itemVar, copyVar, conversationVar, "e")}]})`;
+    },
   );
   if (patched !== source) {
     return patched;
