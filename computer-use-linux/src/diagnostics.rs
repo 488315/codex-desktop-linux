@@ -694,32 +694,7 @@ pub fn setup_accessibility_report() -> SetupReport {
     let accessibility_command = if can_build_accessibility_tree(&before.accessibility) {
         Check::ok("AT-SPI accessibility is already enabled")
     } else {
-        let atspi_status = command_check_with_session_bus(
-            "busctl",
-            &[
-                "--user",
-                "set-property",
-                "org.a11y.Bus",
-                "/org/a11y/bus",
-                "org.a11y.Status",
-                "IsEnabled",
-                "b",
-                "true",
-            ],
-        );
-        if atspi_status.ok {
-            atspi_status
-        } else {
-            command_check_with_session_bus(
-                "gsettings",
-                &[
-                    "set",
-                    "org.gnome.desktop.interface",
-                    "toolkit-accessibility",
-                    "true",
-                ],
-            )
-        }
+        enable_atspi()
     };
     let after = doctor_report();
     let before_ready = before.readiness.can_build_accessibility_tree;
@@ -733,7 +708,11 @@ pub fn setup_accessibility_report() -> SetupReport {
             "AT-SPI accessibility is ready."
         }
     } else {
-        "Could not enable AT-SPI accessibility automatically. Check the accessibility_command detail and enable org.a11y.Status IsEnabled or org.gnome.desktop.interface toolkit-accessibility manually."
+        "Could not enable AT-SPI accessibility automatically. \
+         Check accessibility_command.detail for the attempted commands. \
+         On GNOME: gsettings set org.gnome.desktop.interface toolkit-accessibility true. \
+         On KDE/Plasma: kwriteconfig6 --file kdeglobals --group Accessibility --key ScreenReaderEnabled true (then log out and back in). \
+         On XFCE: xfconf-query --channel xfce4-session --property /general/StartAssistiveTechnologies --set true (then log out and back in)."
     }
     .to_string();
 
@@ -745,6 +724,146 @@ pub fn setup_accessibility_report() -> SetupReport {
         requires_target_app_restart,
         message,
     }
+}
+
+/// Try every applicable method to enable AT-SPI, returning the first that succeeds.
+fn enable_atspi() -> Check {
+    // 1. Cross-desktop D-Bus toggle — works on any desktop when at-spi2-core is
+    //    already running. This is the fastest path and desktop-agnostic.
+    let busctl = command_check_with_session_bus(
+        "busctl",
+        &[
+            "--user",
+            "set-property",
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Status",
+            "IsEnabled",
+            "b",
+            "true",
+        ],
+    );
+    if busctl.ok {
+        return busctl;
+    }
+
+    // 2. Start the at-spi-dbus-bus user service directly — works on any systemd
+    //    desktop where at-spi2-core ships a user unit (most modern distros).
+    let systemd = command_check_with_session_bus(
+        "systemctl",
+        &["--user", "enable", "--now", "at-spi-dbus-bus"],
+    );
+    if systemd.ok {
+        return systemd;
+    }
+
+    // 3. Desktop-specific session settings. These persist across reboots and tell
+    //    the session manager to start at-spi2 on next login; they also sometimes
+    //    trigger an immediate start on GNOME / KDE.
+    let desktop = env_var("XDG_CURRENT_DESKTOP")
+        .or_else(|| env_var("DESKTOP_SESSION"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let detected = if desktop.contains("kde") || desktop.contains("plasma") {
+        enable_atspi_kde()
+    } else if desktop.contains("xfce") {
+        enable_atspi_xfce()
+    } else {
+        // GNOME, COSMIC, and unknown desktops — try gsettings.
+        enable_atspi_gnome()
+    };
+    if detected.ok {
+        return detected;
+    }
+
+    // 4. Shotgun: try all three desktop-specific tools in case the env vars are
+    //    wrong or the session is mixed (e.g. GTK apps under KDE).
+    for check in [enable_atspi_gnome(), enable_atspi_kde(), enable_atspi_xfce()] {
+        if check.ok {
+            return check;
+        }
+    }
+
+    Check::fail(format!(
+        "All AT-SPI enable methods failed. \
+         busctl: {}; systemctl: {}; {}",
+        busctl.detail, systemd.detail, detected.detail,
+    ))
+}
+
+fn enable_atspi_gnome() -> Check {
+    command_check_with_session_bus(
+        "gsettings",
+        &[
+            "set",
+            "org.gnome.desktop.interface",
+            "toolkit-accessibility",
+            "true",
+        ],
+    )
+}
+
+fn enable_atspi_kde() -> Check {
+    // kwriteconfig6 (KDE 6) writes to ~/.config/kdeglobals.  Setting
+    // ScreenReaderEnabled=true causes plasma-session and Qt apps to register
+    // their AT-SPI trees.  kwriteconfig5 is the KDE 5 equivalent.
+    for bin in &["kwriteconfig6", "kwriteconfig5"] {
+        let r = command_check_with_session_bus(
+            bin,
+            &[
+                "--file",
+                "kdeglobals",
+                "--group",
+                "Accessibility",
+                "--key",
+                "ScreenReaderEnabled",
+                "true",
+            ],
+        );
+        if r.ok {
+            return r;
+        }
+    }
+    Check::fail(
+        "kwriteconfig6 and kwriteconfig5 both unavailable or failed; \
+         is ydotool / kde-cli-tools installed?"
+            .to_string(),
+    )
+}
+
+fn enable_atspi_xfce() -> Check {
+    // xfce4-session reads StartAssistiveTechnologies and starts at-spi-bus-launcher
+    // on login when it is true.  --create is needed if the property does not exist yet.
+    let r = command_check_with_session_bus(
+        "xfconf-query",
+        &[
+            "--channel",
+            "xfce4-session",
+            "--property",
+            "/general/StartAssistiveTechnologies",
+            "--set",
+            "true",
+        ],
+    );
+    if r.ok {
+        return r;
+    }
+    // Retry with --create in case the property is missing entirely.
+    command_check_with_session_bus(
+        "xfconf-query",
+        &[
+            "--channel",
+            "xfce4-session",
+            "--property",
+            "/general/StartAssistiveTechnologies",
+            "--create",
+            "--type",
+            "bool",
+            "--set",
+            "true",
+        ],
+    )
 }
 
 fn platform_report() -> PlatformReport {
