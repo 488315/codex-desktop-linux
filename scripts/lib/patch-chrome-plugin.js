@@ -77,6 +77,7 @@ if (!pluginDir) {
 const scriptsDir = path.resolve(pluginDir, "scripts");
 
 const linuxExtensionAwareUserDataFallback = `  const linuxChromeUserDataDirectory = path.join(os.homedir(), ".config", "google-chrome");
+  const linuxChromeCanaryUserDataDirectory = path.join(os.homedir(), ".config", "google-chrome-canary");
   const linuxChromiumUserDataDirectory = path.join(os.homedir(), ".config", "chromium");
   const linuxBraveUserDataDirectory = path.join(
     os.homedir(),
@@ -87,6 +88,7 @@ const linuxExtensionAwareUserDataFallback = `  const linuxChromeUserDataDirector
   const linuxUserDataCandidates = [
     linuxBraveUserDataDirectory,
     linuxChromeUserDataDirectory,
+    linuxChromeCanaryUserDataDirectory,
     linuxChromiumUserDataDirectory,
   ].filter((candidate) => fs.existsSync(candidate));
   const linuxCandidateWithInstalledExtension = linuxUserDataCandidates.find(
@@ -116,6 +118,7 @@ const linuxExtensionAwareUserDataFallback = `  const linuxChromeUserDataDirector
   return linuxChromeUserDataDirectory;`;
 
 const linuxDefaultBrowserUserDataFallback = `  const linuxChromeUserDataDirectory = path.join(os.homedir(), ".config", "google-chrome");
+  const linuxChromeCanaryUserDataDirectory = path.join(os.homedir(), ".config", "google-chrome-canary");
   const linuxChromiumUserDataDirectory = path.join(os.homedir(), ".config", "chromium");
   const linuxBraveUserDataDirectory = path.join(
     os.homedir(),
@@ -131,6 +134,12 @@ const linuxDefaultBrowserUserDataFallback = `  const linuxChromeUserDataDirector
     return linuxBraveUserDataDirectory;
   }
   if (
+    defaultBrowser === "google-chrome-canary.desktop" &&
+    fs.existsSync(linuxChromeCanaryUserDataDirectory)
+  ) {
+    return linuxChromeCanaryUserDataDirectory;
+  }
+  if (
     ["chromium.desktop", "chromium-browser.desktop"].includes(defaultBrowser) &&
     fs.existsSync(linuxChromiumUserDataDirectory)
   ) {
@@ -139,6 +148,7 @@ const linuxDefaultBrowserUserDataFallback = `  const linuxChromeUserDataDirector
 
   if (fs.existsSync(linuxBraveUserDataDirectory)) return linuxBraveUserDataDirectory;
   if (fs.existsSync(linuxChromeUserDataDirectory)) return linuxChromeUserDataDirectory;
+  if (fs.existsSync(linuxChromeCanaryUserDataDirectory)) return linuxChromeCanaryUserDataDirectory;
   if (fs.existsSync(linuxChromiumUserDataDirectory)) return linuxChromiumUserDataDirectory;
 
   return linuxChromeUserDataDirectory;`;
@@ -201,6 +211,7 @@ function isKnownLinuxBrowserCommand(command) {
     "chromium",
     "chromium-browser",
     "google-chrome",
+    "google-chrome-canary",
     "google-chrome-stable",
   ].includes(path.basename(command));
 }
@@ -209,6 +220,9 @@ function defaultLinuxUserDataDirectoryForCommand(command) {
   const commandName = path.basename(command);
   if (["brave", "brave-browser"].includes(commandName)) {
     return path.join(os.homedir(), ".config", "BraveSoftware", "Brave-Browser");
+  }
+  if (commandName === "google-chrome-canary") {
+    return path.join(os.homedir(), ".config", "google-chrome-canary");
   }
   if (["chromium", "chromium-browser"].includes(commandName)) {
     return path.join(os.homedir(), ".config", "chromium");
@@ -230,6 +244,13 @@ const linuxNativeHostManifestFallback = `  if (process.platform === "linux") {
         os.homedir(),
         ".config",
         "google-chrome",
+        "NativeMessagingHosts",
+        \`\${expectedHostName}.json\`,
+      ),
+      path.join(
+        os.homedir(),
+        ".config",
+        "google-chrome-canary",
         "NativeMessagingHosts",
         \`\${expectedHostName}.json\`,
       ),
@@ -265,9 +286,10 @@ patchFileFirstMatch(path.join(scriptsDir, "installManifest.mjs"), {
   oldTexts: [
     'linux:[".config/google-chrome/NativeMessagingHosts"]',
     'linux:[".config/google-chrome/NativeMessagingHosts",".config/BraveSoftware/Brave-Browser/NativeMessagingHosts"]',
+    'linux:[".config/google-chrome/NativeMessagingHosts",".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",".config/chromium/NativeMessagingHosts"]',
   ],
   newText:
-    'linux:[".config/google-chrome/NativeMessagingHosts",".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",".config/chromium/NativeMessagingHosts"]',
+    'linux:[".config/google-chrome/NativeMessagingHosts",".config/google-chrome-canary/NativeMessagingHosts",".config/BraveSoftware/Brave-Browser/NativeMessagingHosts",".config/chromium/NativeMessagingHosts"]',
 });
 
 patchFile(path.join(scriptsDir, "check-native-host-manifest.js"), [
@@ -333,19 +355,19 @@ patchFileFirstMatch(path.join(scriptsDir, "browser-client.mjs"), {
   oldTexts: [
     {
       oldText: String.raw`var Tc=GF(VF(),WF()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome");`,
-      newText: String.raw`var Tc=GF(VF(),WF()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>WF()==="linux"?[GF(VF(),".config","BraveSoftware","Brave-Browser"),GF(VF(),".config","google-chrome"),GF(VF(),".config","chromium")]:[Tc];`,
+      newText: String.raw`var Tc=GF(VF(),WF()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>WF()==="linux"?[GF(VF(),".config","BraveSoftware","Brave-Browser"),GF(VF(),".config","google-chrome"),GF(VF(),".config","google-chrome-canary"),GF(VF(),".config","chromium")]:[Tc];`,
     },
     {
       oldText: String.raw`var Ic=eO(tO(),rO()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome");`,
-      newText: String.raw`var Ic=eO(tO(),rO()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>rO()==="linux"?[eO(tO(),".config","BraveSoftware","Brave-Browser"),eO(tO(),".config","google-chrome"),eO(tO(),".config","chromium")]:[Ic];`,
+      newText: String.raw`var Ic=eO(tO(),rO()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>rO()==="linux"?[eO(tO(),".config","BraveSoftware","Brave-Browser"),eO(tO(),".config","google-chrome"),eO(tO(),".config","google-chrome-canary"),eO(tO(),".config","chromium")]:[Ic];`,
     },
     {
       oldText: String.raw`var hl=Y5(Z5(),X5()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome");`,
-      newText: String.raw`var hl=Y5(Z5(),X5()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>X5()==="linux"?[Y5(Z5(),".config","BraveSoftware","Brave-Browser"),Y5(Z5(),".config","google-chrome"),Y5(Z5(),".config","chromium")]:[hl];`,
+      newText: String.raw`var hl=Y5(Z5(),X5()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>X5()==="linux"?[Y5(Z5(),".config","BraveSoftware","Brave-Browser"),Y5(Z5(),".config","google-chrome"),Y5(Z5(),".config","google-chrome-canary"),Y5(Z5(),".config","chromium")]:[hl];`,
     },
     {
       oldText: String.raw`var kl=M9(F9(),L9()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome");`,
-      newText: String.raw`var kl=M9(F9(),L9()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>L9()==="linux"?[M9(F9(),".config","BraveSoftware","Brave-Browser"),M9(F9(),".config","google-chrome"),M9(F9(),".config","chromium")]:[kl];`,
+      newText: String.raw`var kl=M9(F9(),L9()==="win32"?"AppData\\Local\\Google\\Chrome\\User Data":"Library/Application Support/Google/Chrome"),codexLinuxChromeUserDataDirectories=()=>L9()==="linux"?[M9(F9(),".config","BraveSoftware","Brave-Browser"),M9(F9(),".config","google-chrome"),M9(F9(),".config","google-chrome-canary"),M9(F9(),".config","chromium")]:[kl];`,
     },
   ],
   alreadyText: "codexLinuxChromeUserDataDirectories",
@@ -425,6 +447,13 @@ patchFile(path.join(scriptsDir, "installed-browsers.js"), [
     windowsExecutable: "chrome.exe",
   },
   {
+    name: "Google Chrome Canary",
+    bundleIds: ["com.google.Chrome.canary"],
+    appNames: ["Google Chrome Canary.app"],
+    commands: ["google-chrome-canary"],
+    windowsExecutable: "chrome.exe",
+  },
+  {
     name: "Brave Browser",
     bundleIds: ["com.brave.Browser"],
     appNames: ["Brave Browser.app"],
@@ -451,7 +480,7 @@ patchFile(path.join(scriptsDir, "chrome-is-running.js"), [
 };`,
     newText: `const CHROME_PROCESS_NAMES_BY_PLATFORM = {
   darwin: new Set(["Google Chrome", "Google Chrome Helper"]),
-  linux: new Set(["chrome", "google-chrome", "brave", "brave-browser", "chromium", "chromium-browser"]),
+  linux: new Set(["chrome", "google-chrome", "google-chrome-canary", "brave", "brave-browser", "chromium", "chromium-browser"]),
   win32: new Set(["chrome.exe"]),
 };`,
   },
@@ -572,6 +601,8 @@ patchFile(path.join(scriptsDir, "open-chrome-window.js"), [
     )
   ) {
     linuxCommand = commandPath("brave-browser") || commandPath("brave") || "brave-browser";
+  } else if (linuxUserDataDirectory.includes(path.join(".config", "google-chrome-canary"))) {
+    linuxCommand = commandPath("google-chrome-canary") || "google-chrome-canary";
   } else if (linuxUserDataDirectory.includes(path.join(".config", "chromium"))) {
     linuxCommand = commandPath("chromium") || commandPath("chromium-browser") || "chromium";
   }
