@@ -14,7 +14,7 @@ mod windows;
 
 use anyhow::{Context, Result};
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> Result<()> {
     diagnostics::hydrate_session_bus_env();
 

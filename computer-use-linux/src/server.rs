@@ -77,8 +77,14 @@ impl ComputerUseLinux {
             open_world_hint = false
         )
     )]
-    fn doctor(&self) -> Json<DoctorReport> {
-        Json(doctor_report())
+    async fn doctor(&self) -> Json<DoctorReport> {
+        // doctor_report() runs many short-lived subprocesses (busctl, gsettings, …).
+        // Offload to a blocking thread so the async runtime stays responsive.
+        Json(
+            tokio::task::spawn_blocking(doctor_report)
+                .await
+                .unwrap_or_else(|_| doctor_report()),
+        )
     }
 
     #[tool(
@@ -91,8 +97,14 @@ impl ComputerUseLinux {
             open_world_hint = false
         )
     )]
-    fn setup_accessibility(&self) -> Json<SetupReport> {
-        Json(setup_accessibility_report())
+    async fn setup_accessibility(&self) -> Json<SetupReport> {
+        // setup_accessibility_report() calls gsettings/kwriteconfig/xfconf-query and
+        // retakes a full doctor snapshot before and after — all blocking operations.
+        Json(
+            tokio::task::spawn_blocking(setup_accessibility_report)
+                .await
+                .unwrap_or_else(|_| setup_accessibility_report()),
+        )
     }
 
     #[tool(
@@ -119,8 +131,14 @@ impl ComputerUseLinux {
             open_world_hint = false
         )
     )]
-    fn setup_ydotool(&self) -> Json<YdotoolSetupReport> {
-        Json(setup_ydotool_report())
+    async fn setup_ydotool(&self) -> Json<YdotoolSetupReport> {
+        // setup_ydotool_report() may invoke pkexec (which shows a GUI auth dialog)
+        // and systemctl — all blocking until the OS responds.
+        Json(
+            tokio::task::spawn_blocking(setup_ydotool_report)
+                .await
+                .unwrap_or_else(|_| setup_ydotool_report()),
+        )
     }
 
     #[tool(
@@ -133,8 +151,24 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    fn launch_app(&self, Parameters(params): Parameters<LaunchAppParams>) -> Json<LaunchAppResult> {
-        Json(launch_app(&params.app_name))
+    async fn launch_app(
+        &self,
+        Parameters(params): Parameters<LaunchAppParams>,
+    ) -> Json<LaunchAppResult> {
+        // launch_app searches the filesystem for .desktop files and may call
+        // gtk-launch / gio open, waiting for those processes to exit.
+        let app_name = params.app_name;
+        Json(
+            tokio::task::spawn_blocking(move || launch_app(&app_name))
+                .await
+                .unwrap_or_else(|_| crate::desktop::LaunchAppResult {
+                    ok: false,
+                    app_name: None,
+                    desktop_file: None,
+                    launch_command: None,
+                    message: "launch_app task panicked".to_string(),
+                }),
+        )
     }
 
     #[tool(
@@ -452,25 +486,34 @@ impl ComputerUseLinux {
         let lh = cap.logical_height as i32;
         let scale_x = cap.logical_width as f64 / cap.width as f64;
         let scale_y = cap.logical_height as f64 / cap.height as f64;
-        let Ok(mut guard) = self.abs_pointer.lock() else {
-            return false;
-        };
-        let ok = match guard.as_mut() {
-            Some(p) => p.resize(lw, lh).is_ok(),
-            None => match crate::abs_pointer::AbsPointer::create(lw, lh) {
-                Ok(pointer) => {
-                    *guard = Some(pointer);
-                    true
+        // AbsPointer::create/resize call thread::sleep(500 ms) to let libinput
+        // enumerate the new uinput device. Run on a blocking thread so the async
+        // runtime worker is not stalled during that wait.
+        let abs_pointer = self.abs_pointer.clone();
+        let pointer_coord_scale = self.pointer_coord_scale.clone();
+        tokio::task::spawn_blocking(move || {
+            let Ok(mut guard) = abs_pointer.lock() else {
+                return false;
+            };
+            let ok = match guard.as_mut() {
+                Some(p) => p.resize(lw, lh).is_ok(),
+                None => match crate::abs_pointer::AbsPointer::create(lw, lh) {
+                    Ok(pointer) => {
+                        *guard = Some(pointer);
+                        true
+                    }
+                    Err(_) => false,
+                },
+            };
+            if ok {
+                if let Ok(mut s) = pointer_coord_scale.lock() {
+                    *s = (scale_x, scale_y);
                 }
-                Err(_) => false,
-            },
-        };
-        if ok {
-            if let Ok(mut s) = self.pointer_coord_scale.lock() {
-                *s = (scale_x, scale_y);
             }
-        }
-        ok
+            ok
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Try a coordinate click through the absolute uinput pointer. `Some(ok)` if
