@@ -6,11 +6,13 @@
 //! scaling — clicks land in the wrong place on multi-monitor / HiDPI setups.
 //!
 //! Here we create our own uinput device that exposes a true `ABS_X`/`ABS_Y`
-//! axis whose range equals the **logical desktop size** (the same coordinate
-//! space the portal screenshot reports). The compositor maps an absolute
-//! device's axis range across the whole logical layout, so `ABS(x, y)` lands at
-//! screenshot pixel `(x, y)` regardless of scaling — and with no approval
-//! dialog (we already hold `/dev/uinput` access).
+//! axis whose range is set to the **logical desktop size** queried from the
+//! compositor (not the physical pixel dimensions of the screenshot PNG).
+//! The compositor normalises an absolute device's reported position across the
+//! logical desktop, so callers must convert screenshot-space (physical pixel)
+//! coordinates to logical space before calling [`AbsPointer::move_to`] or
+//! [`AbsPointer::click`]. See `server::ensure_abs_pointer` for how the scale
+//! factors are computed and applied.
 
 use std::thread::sleep;
 use std::time::Duration;

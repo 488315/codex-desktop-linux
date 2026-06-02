@@ -37,13 +37,28 @@ use std::{
     time::Duration,
 };
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ComputerUseLinux {
     last_nodes: Arc<Mutex<Vec<AccessibilityNode>>>,
     portal_pointer_session: Arc<Mutex<Option<PortalPointerSession>>>,
     portal_keyboard_session: Arc<Mutex<Option<PortalKeyboardSession>>>,
     /// Lazily-created uinput absolute pointer (preferred coordinate backend).
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
+    /// Scale factors (logical / physical) applied to screenshot-space coords
+    /// before sending to the ABS pointer. Updated by ensure_abs_pointer.
+    pointer_coord_scale: Arc<Mutex<(f64, f64)>>,
+}
+
+impl Default for ComputerUseLinux {
+    fn default() -> Self {
+        Self {
+            last_nodes: Default::default(),
+            portal_pointer_session: Default::default(),
+            portal_keyboard_session: Default::default(),
+            abs_pointer: Default::default(),
+            pointer_coord_scale: Arc::new(Mutex::new((1.0, 1.0))),
+        }
+    }
 }
 
 #[tool_router]
@@ -397,21 +412,33 @@ impl ComputerUseLinux {
         let Ok(cap) = crate::screenshot::capture_screenshot().await else {
             return false;
         };
-        let w = cap.width as i32;
-        let h = cap.height as i32;
+        // Use logical dims for the ABS range so the compositor maps coordinates
+        // correctly regardless of display scale factor. Physical dims are used
+        // by the model to express coordinates within the screenshot image; we
+        // convert them to logical space at click/drag time via pointer_coord_scale.
+        let lw = cap.logical_width as i32;
+        let lh = cap.logical_height as i32;
+        let scale_x = cap.logical_width as f64 / cap.width as f64;
+        let scale_y = cap.logical_height as f64 / cap.height as f64;
         let Ok(mut guard) = self.abs_pointer.lock() else {
             return false;
         };
-        match guard.as_mut() {
-            Some(p) => p.resize(w, h).is_ok(),
-            None => match crate::abs_pointer::AbsPointer::create(w, h) {
+        let ok = match guard.as_mut() {
+            Some(p) => p.resize(lw, lh).is_ok(),
+            None => match crate::abs_pointer::AbsPointer::create(lw, lh) {
                 Ok(pointer) => {
                     *guard = Some(pointer);
                     true
                 }
                 Err(_) => false,
             },
+        };
+        if ok {
+            if let Ok(mut s) = self.pointer_coord_scale.lock() {
+                *s = (scale_x, scale_y);
+            }
         }
+        ok
     }
 
     /// Try a coordinate click through the absolute uinput pointer. `Some(ok)` if
@@ -426,10 +453,17 @@ impl ComputerUseLinux {
         if !self.ensure_abs_pointer().await {
             return None;
         }
+        let (sx, sy) = self
+            .pointer_coord_scale
+            .lock()
+            .map(|g| *g)
+            .unwrap_or((1.0, 1.0));
+        let lx = (x as f64 * sx).round() as i32;
+        let ly = (y as f64 * sy).round() as i32;
         let btn = crate::abs_pointer::PointerButton::from_name(button);
         let mut guard = self.abs_pointer.lock().ok()?;
         let pointer = guard.as_mut()?;
-        Some(pointer.click(x, y, btn, count).is_ok())
+        Some(pointer.click(lx, ly, btn, count).is_ok())
     }
 
     #[tool(
@@ -775,11 +809,19 @@ impl ComputerUseLinux {
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let dragged = {
+                let (sx, sy) = self
+                    .pointer_coord_scale
+                    .lock()
+                    .map(|g| *g)
+                    .unwrap_or((1.0, 1.0));
+                let scale = move |x: i32, y: i32| {
+                    ((x as f64 * sx).round() as i32, (y as f64 * sy).round() as i32)
+                };
                 if let Ok(mut guard) = self.abs_pointer.lock() {
                     guard.as_mut().map(|p| {
                         p.drag(
-                            (params.start_x, params.start_y),
-                            (params.end_x, params.end_y),
+                            scale(params.start_x, params.start_y),
+                            scale(params.end_x, params.end_y),
                             crate::abs_pointer::PointerButton::Left,
                         )
                         .is_ok()

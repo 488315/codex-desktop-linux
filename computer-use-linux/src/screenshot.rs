@@ -25,8 +25,15 @@ pub struct ScreenshotCapture {
     pub mime_type: String,
     pub data_url: String,
     pub source: String,
+    /// Physical pixel dimensions of the captured image.
     pub width: u32,
     pub height: u32,
+    /// Logical desktop dimensions for uinput ABS axis calibration.
+    /// Equal to `width`/`height` for backends that already return logical coords.
+    /// For GNOME Shell (which captures at physical resolution), this is queried
+    /// from Mutter and differs by the display scale factor.
+    pub logical_width: u32,
+    pub logical_height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,12 +185,69 @@ async fn capture_with_gnome_shell() -> Result<ScreenshotCapture> {
         bail!("GNOME Shell reported screenshot failure");
     }
 
-    read_png_as_capture(
+    let mut capture = read_png_as_capture(
         PathBuf::from(filename_used),
         "gnome-shell",
         ScreenshotCleanup::DeletePath(path),
     )
+    .await?;
+
+    // GNOME Shell captures at physical pixel resolution. Override the logical
+    // dims from Mutter so the ABS pointer uses the correct coordinate space.
+    if let Ok((lw, lh)) = gnome_logical_desktop_size(&connection).await {
+        capture.logical_width = lw;
+        capture.logical_height = lh;
+    }
+
+    Ok(capture)
+}
+
+/// Query the logical desktop bounding box from Mutter DisplayConfig.
+///
+/// Each logical monitor carries `"width"` and `"height"` in its properties dict
+/// (GNOME 40+). We take the union of all monitors' rectangles.
+async fn gnome_logical_desktop_size(connection: &zbus::Connection) -> Result<(u32, u32)> {
+    let proxy = Proxy::new(
+        connection,
+        "org.gnome.Mutter.DisplayConfig",
+        "/org/gnome/Mutter/DisplayConfig",
+        "org.gnome.Mutter.DisplayConfig",
+    )
     .await
+    .context("failed to create Mutter DisplayConfig proxy")?;
+
+    // Signature: (u serial, a(…) monitors, a(iiduba(ss)a{sv}) logical_monitors, a{sv})
+    // We use OwnedValue for the monitors array (complex nested type we don't need).
+    type LogicalMonitor = (i32, i32, f64, u32, bool, Vec<(String, String)>, HashMap<String, OwnedValue>);
+    let (_serial, _monitors, logical_monitors, _props): (
+        u32,
+        OwnedValue,
+        Vec<LogicalMonitor>,
+        HashMap<String, OwnedValue>,
+    ) = proxy
+        .call("GetCurrentState", &())
+        .await
+        .context("Mutter DisplayConfig.GetCurrentState failed")?;
+
+    let (mut max_x, mut max_y) = (0i32, 0i32);
+    for (x, y, _scale, _transform, _primary, _specs, props) in &logical_monitors {
+        let w = props
+            .get("width")
+            .and_then(|v| u32::try_from(v.clone()).ok())
+            .unwrap_or(0) as i32;
+        let h = props
+            .get("height")
+            .and_then(|v| u32::try_from(v.clone()).ok())
+            .unwrap_or(0) as i32;
+        max_x = max_x.max(x + w);
+        max_y = max_y.max(y + h);
+    }
+
+    if max_x > 0 && max_y > 0 {
+        Ok((max_x as u32, max_y as u32))
+    } else {
+        bail!("Mutter returned no logical monitors with width/height properties")
+    }
 }
 
 async fn capture_with_portal() -> Result<ScreenshotCapture> {
@@ -303,6 +367,8 @@ fn read_png_as_capture_inner(path: &Path, source: &str) -> Result<ScreenshotCapt
         source: source.to_string(),
         width,
         height,
+        logical_width: width,
+        logical_height: height,
     })
 }
 
