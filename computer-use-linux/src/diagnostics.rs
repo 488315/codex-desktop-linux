@@ -1,6 +1,6 @@
 use crate::windowing::registry::{
-    self, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, KWIN_BACKEND,
+    self, COSMIC_WAYLAND_BACKEND, EWMH_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
+    GNOME_SHELL_INTROSPECT_BACKEND, HYPRLAND_BACKEND, KWIN_BACKEND,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -258,6 +258,9 @@ fn capability_map(
     }
     if windowing.cosmic_helper.ok {
         window_backends.push("cosmic".to_string());
+    }
+    if windowing.backends.get(EWMH_BACKEND).is_some_and(|c| c.ok) {
+        window_backends.push("ewmh".to_string());
     }
 
     let mut accessibility_backends = Vec::new();
@@ -931,6 +934,7 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     let can_list_windows = probes.iter().any(|probe| probe.can_list_windows);
     let can_focus_apps = probes.iter().any(|probe| probe.can_focus_apps);
     let can_focus_windows = probes.iter().any(|probe| probe.can_focus_windows);
+    let ewmh_ok = backends.get(EWMH_BACKEND).is_some_and(|c| c.ok);
     let note = if can_list_windows {
         if cosmic_helper.ok && is_cosmic_wayland_platform(platform) {
             "A COSMIC Wayland window backend is available for list_windows, focused_window, and targeted input verification."
@@ -938,11 +942,13 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
             "A KWin/Plasma window backend is available for list_windows, focused_window, and targeted input verification."
         } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
+        } else if ewmh_ok {
+            "An ICCCM/EWMH window backend (wmctrl) is available for list_windows, focused_window, and targeted input verification on this X11 session."
         } else {
             "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
         }
     } else {
-        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On COSMIC, ensure the bundled COSMIC helper is present and can connect to the session. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session."
+        "Window listing is unavailable or denied. Computer Use can still use screenshots, AT-SPI, and global ydotool input, but targeted window input cannot be verified. On GNOME, run setup_window_targeting to install the optional GNOME Shell extension backend. On COSMIC, ensure the bundled COSMIC helper is present and can connect to the session. On KDE/Plasma, ensure KWin exposes org.kde.KWin scripting on the session bus. On Hyprland, ensure hyprctl is available in the session. On X11 with any ICCCM/EWMH window manager (Openbox, XFWM, Fluxbox, …), install wmctrl."
     }
     .to_string();
 

@@ -1,14 +1,15 @@
-use crate::windowing::backends::{cosmic, gnome, hyprland, i3, kwin};
+use crate::windowing::backends::{cosmic, ewmh, gnome, hyprland, i3, kwin};
 use crate::windowing::types::WindowInfo;
 use anyhow::{anyhow, Result};
 
 pub use cosmic::COSMIC_WAYLAND_BACKEND;
+pub use ewmh::EWMH_BACKEND;
 pub use gnome::{GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND};
 pub use hyprland::HYPRLAND_BACKEND;
 pub use i3::I3_BACKEND;
 pub use kwin::KWIN_BACKEND;
 
-pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the Codex GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
+pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the Codex GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, i3-msg, or wmctrl (generic ICCCM/EWMH for any X11 WM). On GNOME, run setup_window_targeting to install the extension backend. On X11 (Openbox, XFWM, Fluxbox, …), install wmctrl.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct BackendDescriptor {
@@ -37,6 +38,7 @@ enum BackendKind {
     Kwin,
     Hyprland,
     I3,
+    Ewmh,
 }
 
 const BACKEND_ORDER: &[BackendKind] = &[
@@ -46,6 +48,7 @@ const BACKEND_ORDER: &[BackendKind] = &[
     BackendKind::Kwin,
     BackendKind::Hyprland,
     BackendKind::I3,
+    BackendKind::Ewmh, // generic ICCCM/EWMH fallback for any X11 WM
 ];
 
 const DESCRIPTORS: &[BackendDescriptor] = &[
@@ -89,6 +92,13 @@ const DESCRIPTORS: &[BackendDescriptor] = &[
         failure_label: "i3",
         list_note: "Window list came from i3-msg. Terminal windows may include best-effort PTY and active-process context when xprop and the process tree are readable.",
         missing_hint: "On i3, ensure i3-msg can reach the active i3 IPC socket.",
+        can_exact_focus: true,
+    },
+    BackendDescriptor {
+        id: EWMH_BACKEND,
+        failure_label: "wmctrl EWMH",
+        list_note: "Window list came from wmctrl ICCCM/EWMH. Works on any ICCCM/EWMH-compliant X11 window manager (Openbox, XFWM, Fluxbox, Enlightenment, …). Terminal windows may include best-effort PTY and active-process context when the process tree is readable.",
+        missing_hint: "On X11 with a non-i3 window manager, install wmctrl for generic ICCCM/EWMH window listing and activation.",
         can_exact_focus: true,
     },
 ];
@@ -153,6 +163,7 @@ async fn list_windows_for(backend: BackendKind) -> Result<Vec<WindowInfo>> {
         BackendKind::Kwin => kwin::list_windows().await,
         BackendKind::Hyprland => hyprland::list_windows(),
         BackendKind::I3 => i3::list_windows(),
+        BackendKind::Ewmh => ewmh::list_windows(),
     }
 }
 
@@ -176,6 +187,7 @@ pub async fn activate_window(window: &WindowInfo) -> Result<()> {
         KWIN_BACKEND => kwin::activate_window(window.window_id).await,
         HYPRLAND_BACKEND => hyprland::activate_window(window.window_id),
         I3_BACKEND => i3::activate_window(window.window_id),
+        EWMH_BACKEND => ewmh::activate_window(window.window_id),
         backend => Err(anyhow!(
             "Unsupported window backend for activation: {backend}"
         )),
@@ -194,6 +206,7 @@ pub fn probe_backends() -> Vec<BackendProbe> {
         kwin::probe(),
         hyprland::probe(),
         i3::probe(),
+        ewmh::probe(),
     ]
 }
 
@@ -206,6 +219,7 @@ impl BackendKind {
             BackendKind::Kwin => KWIN_BACKEND,
             BackendKind::Hyprland => HYPRLAND_BACKEND,
             BackendKind::I3 => I3_BACKEND,
+            BackendKind::Ewmh => EWMH_BACKEND,
         }
     }
 

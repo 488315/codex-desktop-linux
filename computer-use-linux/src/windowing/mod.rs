@@ -5,8 +5,9 @@ pub mod types;
 
 #[allow(unused_imports)]
 pub use registry::{
-    COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, WINDOW_PERMISSION_HINT,
+    COSMIC_WAYLAND_BACKEND, EWMH_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
+    GNOME_SHELL_INTROSPECT_BACKEND, HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND,
+    WINDOW_PERMISSION_HINT,
 };
 #[allow(unused_imports)]
 pub use target::{
@@ -55,6 +56,7 @@ mod tests {
                 KWIN_BACKEND,
                 HYPRLAND_BACKEND,
                 I3_BACKEND,
+                EWMH_BACKEND,
             ]
         );
     }

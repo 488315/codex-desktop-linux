@@ -4,8 +4,8 @@ pkgname=codex-desktop-linux-git
 _pkgbase=codex-desktop-linux
 _pkgname=codex-desktop
 # Pinned commit — run ./update.sh to advance to latest
-_commit=c956372c51b189bf47845081288db9dea671b261
-pkgver=0.r830.gc956372
+_commit=73f916889cb55fb74aea6acffb070c238bb3fda6
+pkgver=0.r0.g73f9168
 pkgrel=1
 pkgdesc="Codex Desktop for Linux with Computer Use, built from the latest upstream Git commit"
 arch=('x86_64' 'aarch64')
@@ -59,6 +59,7 @@ optdepends=(
     'ydotool: input synthesis support for Linux Computer Use'
     'scrot: X11 screenshot fallback for Linux Computer Use'
     'maim: X11 screenshot fallback for Linux Computer Use (alternative to scrot)'
+    'wmctrl: ICCCM/EWMH window listing and activation for X11 WMs (Openbox, XFWM, Fluxbox, …)'
     'libnotify: desktop notifications for updates (notify-send)'
 )
 provides=('codex-desktop')
