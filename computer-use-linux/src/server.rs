@@ -3,7 +3,10 @@ use crate::atspi_tree::{
     snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
     ValueSetInvocation,
 };
-use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
+use crate::diagnostics::{
+    doctor_report, setup_accessibility_report, setup_ydotool_report, DoctorReport, SetupReport,
+    YdotoolSetupReport,
+};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, keysyms_for_text, press_keycode_chord,
@@ -103,6 +106,20 @@ impl ComputerUseLinux {
     )]
     async fn setup_window_targeting(&self) -> Json<WindowTargetingSetupReport> {
         Json(setup_window_targeting_report().await)
+    }
+
+    #[tool(
+        name = "setup_ydotool",
+        description = "Configure ydotool for Linux Computer Use. Writes /etc/udev/rules.d/70-uinput.rules via pkexec so the input group owns /dev/uinput, adds the current user to the input group via pkexec usermod, reloads udev rules, and enables/starts the ydotoold user service via systemctl. Idempotent: each step is skipped when already satisfied. If requires_relogin is true in the report, the user must log out and back in before the new group membership is visible to session processes.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    fn setup_ydotool(&self) -> Json<YdotoolSetupReport> {
+        Json(setup_ydotool_report())
     }
 
     #[tool(
@@ -1041,7 +1058,7 @@ impl ComputerUseLinux {
 #[tool_handler(
     name = "codex-computer-use-linux",
     version = "0.2.3-linux-alpha1",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, and send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. If diagnostics report ydotool is not configured (input.ydotoold or input.ydotool_socket failing) and neither /dev/uinput (abs_pointer) nor the XDG RemoteDesktop portal is available for input, call setup_ydotool; if the report's requires_relogin field is true, ask the user to log out and back in. This Linux backend can capture screenshots through GNOME Shell or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, and send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified."
 )]
 impl ServerHandler for ComputerUseLinux {}
 

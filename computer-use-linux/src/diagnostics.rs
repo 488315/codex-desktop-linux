@@ -8,12 +8,13 @@ use std::{
     collections::{BTreeMap, HashMap},
     env, fs,
     fs::OpenOptions,
+    io::Write,
     os::unix::{
         fs::MetadataExt,
         net::{UnixDatagram, UnixStream},
     },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 const DESKTOP_ENV_KEYS: &[&str] = &[
@@ -142,6 +143,29 @@ pub struct SetupReport {
     pub after: DoctorReport,
     pub changed_accessibility: bool,
     pub requires_target_app_restart: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct YdotoolSetupReport {
+    pub before: DoctorReport,
+    /// False when ydotool is not installed; install it first then call this tool again.
+    pub ydotool_installed: bool,
+    /// Result of writing /etc/udev/rules.d/70-uinput.rules so the input group can
+    /// access /dev/uinput. Skipped when /dev/uinput is already readable/writable.
+    pub udev_rule: Check,
+    /// Result of adding the current user to the `input` group via pkexec usermod.
+    /// Skipped when the user is already a member.
+    pub group_membership: Check,
+    /// Result of pkexec udevadm reload + trigger so the new device permissions take
+    /// effect immediately. Skipped when /dev/uinput was already accessible.
+    pub udev_reload: Check,
+    /// Result of systemctl --user enable --now ydotoold.
+    pub ydotoold_service: Check,
+    pub after: DoctorReport,
+    /// True when group membership was newly granted. The user must log out and back
+    /// in before existing session processes (including ydotoold) see the new group.
+    pub requires_relogin: bool,
     pub message: String,
 }
 
@@ -444,6 +468,223 @@ fn parse_line_environment(bytes: &[u8]) -> HashMap<String, String> {
             Some((key, value))
         })
         .collect()
+}
+
+pub fn setup_ydotool_report() -> YdotoolSetupReport {
+    hydrate_session_bus_env();
+    let before = doctor_report();
+
+    let ydotool_installed = before.input.ydotool.ok;
+
+    let udev_rule_path = Path::new("/etc/udev/rules.d/70-uinput.rules");
+    let udev_rule = if before.input.uinput.ok {
+        Check::ok("/dev/uinput is already accessible; udev rule not needed")
+    } else if udev_rule_path.exists() {
+        Check::ok(format!("{} already exists", udev_rule_path.display()))
+    } else {
+        write_file_with_pkexec(
+            udev_rule_path,
+            r#"KERNEL=="uinput", GROUP="input", MODE="0660""#,
+        )
+    };
+
+    let was_already_in_group = user_in_input_group();
+    let group_membership = if was_already_in_group {
+        Check::ok("user is already in the input group")
+    } else {
+        add_user_to_input_group()
+    };
+
+    let udev_reload = if !before.input.uinput.ok && udev_rule.ok {
+        reload_udev_rules()
+    } else {
+        Check::ok("udev reload skipped (/dev/uinput already accessible or udev rule not written)")
+    };
+
+    let ydotoold_service = if !ydotool_installed {
+        Check::fail(
+            "ydotool is not installed; install it (e.g. sudo pacman -S ydotool) then call setup_ydotool again"
+                .to_string(),
+        )
+    } else if before.input.ydotoold.ok && before.input.ydotool_socket.ok {
+        Check::ok("ydotoold is already running with a connectable socket")
+    } else {
+        enable_ydotoold_service()
+    };
+
+    let after = doctor_report();
+    let requires_relogin = !was_already_in_group && group_membership.ok;
+
+    let message = ydotool_setup_message(
+        &after,
+        &ydotoold_service,
+        ydotool_installed,
+        requires_relogin,
+    );
+
+    YdotoolSetupReport {
+        before,
+        ydotool_installed,
+        udev_rule,
+        group_membership,
+        udev_reload,
+        ydotoold_service,
+        after,
+        requires_relogin,
+        message,
+    }
+}
+
+fn ydotool_setup_message(
+    after: &DoctorReport,
+    ydotoold_service: &Check,
+    ydotool_installed: bool,
+    requires_relogin: bool,
+) -> String {
+    let input_ready =
+        after.input.uinput.ok || (after.input.ydotoold.ok && after.input.ydotool_socket.ok);
+
+    if !ydotool_installed {
+        return "Install ydotool first, then call setup_ydotool again.".to_string();
+    }
+
+    let mut parts: Vec<&str> = Vec::new();
+
+    if requires_relogin {
+        parts.push(
+            "Log out and back in for the new input group membership to take effect.",
+        );
+    }
+
+    if !ydotoold_service.ok {
+        parts.push(
+            "ydotoold service could not be started; run: systemctl --user enable --now ydotoold",
+        );
+    }
+
+    if parts.is_empty() {
+        if input_ready {
+            "ydotool setup complete: /dev/uinput or a connectable ydotoold socket is now available.".to_string()
+        } else {
+            "Setup steps ran but input is still not available; check udev_rule, udev_reload, and ydotoold_service details.".to_string()
+        }
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn write_file_with_pkexec(path: &Path, content: &str) -> Check {
+    let path_str = path.to_string_lossy().into_owned();
+    let mut child = match Command::new("pkexec")
+        .args(["tee", path_str.as_str()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => return Check::fail(format!("pkexec not available: {e}")),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(content.as_bytes());
+        let _ = stdin.write_all(b"\n");
+    }
+    match child.wait_with_output() {
+        Ok(out) if out.status.success() => Check::ok(format!("wrote {path_str}")),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Check::fail(format!(
+                "pkexec tee {path_str} failed ({}): {}",
+                out.status, stderr
+            ))
+        }
+        Err(e) => Check::fail(format!("pkexec tee {path_str}: {e}")),
+    }
+}
+
+fn user_in_input_group() -> bool {
+    Command::new("id")
+        .output()
+        .ok()
+        .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("(input)"))
+}
+
+fn add_user_to_input_group() -> Check {
+    let username = match Command::new("id").arg("-un").output() {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        _ => return Check::fail("could not determine current username via id -un".to_string()),
+    };
+    if username.is_empty() {
+        return Check::fail("id -un returned an empty username".to_string());
+    }
+    let output = Command::new("pkexec")
+        .args(["usermod", "-aG", "input", username.as_str()])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            Check::ok(format!("added {username} to the input group"))
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Check::fail(format!(
+                "pkexec usermod -aG input {username} failed ({}): {}",
+                out.status, stderr
+            ))
+        }
+        Err(e) => Check::fail(format!("pkexec not available: {e}")),
+    }
+}
+
+fn reload_udev_rules() -> Check {
+    match Command::new("pkexec")
+        .args(["udevadm", "control", "--reload-rules"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Check::fail(format!(
+                "udevadm control --reload-rules failed ({}): {}",
+                out.status, stderr
+            ));
+        }
+        Err(e) => return Check::fail(format!("pkexec udevadm control: {e}")),
+    }
+    match Command::new("pkexec")
+        .args(["udevadm", "trigger", "--subsystem-match=misc"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            Check::ok("udev rules reloaded and misc subsystem triggered")
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Check::fail(format!(
+                "udevadm trigger --subsystem-match=misc failed ({}): {}",
+                out.status, stderr
+            ))
+        }
+        Err(e) => Check::fail(format!("pkexec udevadm trigger: {e}")),
+    }
+}
+
+fn enable_ydotoold_service() -> Check {
+    match Command::new("systemctl")
+        .args(["--user", "enable", "--now", "ydotoold"])
+        .output()
+    {
+        Ok(out) if out.status.success() => Check::ok("ydotoold user service enabled and started"),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Check::fail(format!(
+                "systemctl --user enable --now ydotoold failed ({}): {}",
+                out.status, stderr
+            ))
+        }
+        Err(e) => Check::fail(format!("systemctl not available: {e}")),
+    }
 }
 
 pub fn setup_accessibility_report() -> SetupReport {
