@@ -1,0 +1,140 @@
+# Maintainer: kjones <kvjones0243@gmail.com>
+
+pkgname=codex-desktop-linux-git
+_pkgbase=codex-desktop-linux
+_pkgname=codex-desktop
+# Pinned commit — run ./update.sh to advance to latest
+_commit=01a26ee8d9415261e34679250937bca97f691aba
+pkgver=0.r826.g01a26ee
+pkgrel=1
+pkgdesc="Codex Desktop for Linux with Computer Use, built from the latest upstream Git commit"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ilysenko/codex-desktop-linux"
+license=('MIT')
+depends=(
+    # Electron runtime
+    'alsa-lib'
+    'at-spi2-core'
+    'atk'
+    'cairo'
+    'curl'
+    'dbus'
+    'gcc'
+    'glib2'
+    'gtk3'
+    'libcups'
+    'libdrm'
+    'libx11'
+    'libxcb'
+    'libxcomposite'
+    'libxdamage'
+    'libxext'
+    'libxfixes'
+    'libxkbcommon'
+    'libxrandr'
+    'make'
+    'mesa'
+    'nspr'
+    'nss'
+    'p7zip'
+    'pango'
+    'polkit'
+    'python'
+    'unzip'
+    # Computer Use / Read Aloud native binaries
+    'libevdev'
+    'wayland'
+)
+makedepends=(
+    'cargo'
+    'git'
+    'npm'
+    'rust'
+)
+optdepends=(
+    'nodejs>=22.22.0: optional override for the bundled managed Node.js runtime'
+    'npm: optional override for Codex CLI install/update flows'
+    'zenity: GTK dialog fallback when the Codex CLI is missing'
+    'kdialog: KDE dialog fallback when the Codex CLI is missing'
+    'ydotool: input synthesis support for Linux Computer Use'
+    'libnotify: desktop notifications for updates (notify-send)'
+)
+provides=('codex-desktop')
+conflicts=('codex-desktop')
+options=(!debug !strip !lto)
+install="${pkgname}.install"
+source=("${_pkgbase}::git+https://github.com/ilysenko/codex-desktop-linux.git#commit=${_commit}")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "${srcdir}/${_pkgbase}"
+    printf '0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+prepare() {
+    cd "${srcdir}/${_pkgbase}"
+    rm -rf codex-app dist
+    # Pre-fetch Cargo dependencies (avoids network access during build())
+    export CARGO_HOME="${srcdir}/cargo-home"
+    cargo fetch --locked 2>/dev/null || cargo fetch
+}
+
+build() {
+    cd "${srcdir}/${_pkgbase}"
+    export CARGO_HOME="${srcdir}/cargo-home"
+    export CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1
+
+    # Build the Electron app from the upstream DMG via install.sh
+    make build-app
+
+    # Build the self-update manager daemon
+    make build-updater
+
+    # Build Computer Use and Read Aloud native MCP server binaries
+    cargo build --release \
+        -p codex-computer-use-linux \
+        -p codex-read-aloud-linux
+
+    # Build the COSMIC Wayland pointer helper if on COSMIC
+    cargo build --release \
+        -p codex-computer-use-linux \
+        --bin codex-computer-use-cosmic 2>/dev/null || true
+}
+
+package() {
+    cd "${srcdir}/${_pkgbase}"
+
+    local repo_dir="${PWD}"
+
+    REPO_DIR="${repo_dir}"
+    APP_DIR="${repo_dir}/codex-app"
+    PACKAGE_NAME="${_pkgname}"
+    UPDATER_BINARY_SOURCE="${repo_dir}/target/release/codex-update-manager"
+    UPDATER_SERVICE_SOURCE="${repo_dir}/packaging/linux/codex-update-manager.service"
+    PACKAGED_RUNTIME_SOURCE="${repo_dir}/packaging/linux/codex-packaged-runtime.sh"
+    DESKTOP_TEMPLATE="${repo_dir}/packaging/linux/codex-desktop.desktop"
+    ICON_SOURCE="${repo_dir}/assets/codex.png"
+
+    source "${repo_dir}/scripts/lib/package-common.sh"
+    stage_common_package_files "${pkgdir}"
+    stage_update_builder_bundle "${pkgdir}"
+    write_launcher_stub "${pkgdir}"
+
+    # Install Computer Use MCP server binary
+    install -Dm755 "${repo_dir}/target/release/codex-computer-use-linux" \
+        "${pkgdir}/usr/bin/codex-computer-use-linux"
+
+    # Install Chrome native messaging host for Computer Use browser integration
+    install -Dm755 "${repo_dir}/target/release/codex-chrome-extension-host" \
+        "${pkgdir}/usr/bin/codex-chrome-extension-host"
+
+    # Install COSMIC Wayland pointer helper (optional — only built on COSMIC)
+    if [ -f "${repo_dir}/target/release/codex-computer-use-cosmic" ]; then
+        install -Dm755 "${repo_dir}/target/release/codex-computer-use-cosmic" \
+            "${pkgdir}/usr/bin/codex-computer-use-cosmic"
+    fi
+
+    # Install Read Aloud MCP server binary
+    install -Dm755 "${repo_dir}/target/release/codex-read-aloud-linux" \
+        "${pkgdir}/usr/bin/codex-read-aloud-linux"
+}
