@@ -72,7 +72,7 @@ help:
 	@printf '  %-18s %s\n' "make rebuild-install" "Find a DMG, rebuild, and install into codex-app/"
 	@printf '  %-18s %s\n' "make inspect-upstream" "Inspect a DMG and write rebuild reports without changing codex-app/"
 	@printf '  %-18s %s\n' "make build-app" "Run install.sh and regenerate codex-app/ (reuses cached Codex.dmg)"
-	@printf '  %-18s %s\n' "make build-app-fresh" "Remove cached Codex.dmg and regenerate codex-app/"
+	@printf '  %-18s %s\n' "make build-app-fresh" "Delete cached DMG, re-download, and rebuild codex-app/"
 	@printf '  %-18s %s\n' "make setup-native" "Guided setup summary and Linux feature config helper"
 	@printf '  %-18s %s\n' "make bootstrap-native" "Install deps, fresh-build, package, and install"
 	@printf '  %-18s %s\n' "make install-native" "Fresh-build, package, and install"
@@ -176,7 +176,7 @@ build-app:
 	MAX_BUILD_THREADS="$(MAX_BUILD_THREADS)" ./install.sh "$(DMG)"
 
 build-app-fresh:
-	@echo "[make] Regenerating codex-app from fresh DMG"
+	@echo "[make] Cleaning codex-app/ and re-downloading fresh DMG"
 	MAX_BUILD_THREADS="$(MAX_BUILD_THREADS)" ./install.sh --fresh "$(DMG)"
 
 setup-native:
