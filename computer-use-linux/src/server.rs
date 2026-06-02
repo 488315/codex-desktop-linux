@@ -3,7 +3,7 @@ use crate::atspi_tree::{
     snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
     ValueSetInvocation,
 };
-use crate::desktop::{launch_app, LaunchAppResult};
+use crate::desktop::{launch_app, list_installed_apps, InstalledApp, LaunchAppResult};
 use crate::diagnostics::{
     doctor_report, setup_accessibility_report, setup_ydotool_report, DoctorReport, SetupReport,
     YdotoolSetupReport,
@@ -38,8 +38,18 @@ use std::{
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+const POINTER_DIMS_TTL: Duration = Duration::from_secs(30);
+
+struct CachedPointerDims {
+    lw: i32,
+    lh: i32,
+    scale_x: f64,
+    scale_y: f64,
+    captured_at: Instant,
+}
 
 #[derive(Clone)]
 pub struct ComputerUseLinux {
@@ -51,6 +61,8 @@ pub struct ComputerUseLinux {
     /// Scale factors (logical / physical) applied to screenshot-space coords
     /// before sending to the ABS pointer. Updated by ensure_abs_pointer.
     pointer_coord_scale: Arc<Mutex<(f64, f64)>>,
+    /// Cached logical dims for the ABS pointer to avoid a screenshot on every click.
+    pointer_dims_cache: Arc<Mutex<Option<CachedPointerDims>>>,
 }
 
 impl Default for ComputerUseLinux {
@@ -61,6 +73,7 @@ impl Default for ComputerUseLinux {
             portal_keyboard_session: Default::default(),
             abs_pointer: Default::default(),
             pointer_coord_scale: Arc::new(Mutex::new((1.0, 1.0))),
+            pointer_dims_cache: Default::default(),
         }
     }
 }
@@ -169,6 +182,23 @@ impl ComputerUseLinux {
                     message: "launch_app task panicked".to_string(),
                 }),
         )
+    }
+
+    #[tool(
+        name = "list_installed_apps",
+        description = "Return all installed desktop applications found in XDG application directories. Each entry has a name, desktop_file path, and optional comment. Use this to discover the correct app name or desktop-file stem to pass to launch_app when you don't know it.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn list_installed_apps(&self) -> Json<ListInstalledAppsOutput> {
+        let apps = tokio::task::spawn_blocking(list_installed_apps)
+            .await
+            .unwrap_or_default();
+        Json(ListInstalledAppsOutput { apps })
     }
 
     #[tool(
@@ -320,34 +350,44 @@ impl ComputerUseLinux {
         let app_filter = self
             .resolve_accessibility_app_filter(&params, window_context.as_ref())
             .await;
-        let (screenshot, screenshot_error) = if include_screenshot {
-            match capture_screenshot().await {
-                Ok(capture) => (Some(capture), None),
-                Err(error) => (None, Some(error.to_string())),
-            }
-        } else {
-            (None, None)
-        };
-        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) =
-            if diagnostics.readiness.can_build_accessibility_tree {
-                let target_pid = window_context.as_ref().and_then(|window| window.pid);
-                match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth).await {
-                    Ok(nodes) => {
-                        let raw_count = nodes.len();
-                        (compact_accessibility_tree(nodes), raw_count, None)
+        let target_pid = window_context.as_ref().and_then(|window| window.pid);
+        let can_build_tree = diagnostics.readiness.can_build_accessibility_tree;
+        let (screenshot_result, tree_result) = tokio::join!(
+            async {
+                if include_screenshot {
+                    match capture_screenshot().await {
+                        Ok(capture) => (Some(capture), None),
+                        Err(error) => (None, Some(error.to_string())),
                     }
-                    Err(error) => (Vec::new(), 0, Some(error.to_string())),
+                } else {
+                    (None, None)
                 }
-            } else {
-                (
-                    Vec::new(),
-                    0,
-                    Some(
-                        "GNOME accessibility is disabled; call setup_accessibility first."
-                            .to_string(),
-                    ),
-                )
-            };
+            },
+            async {
+                if can_build_tree {
+                    match snapshot_tree(app_filter.as_deref(), target_pid, max_nodes, max_depth)
+                        .await
+                    {
+                        Ok(nodes) => {
+                            let raw_count = nodes.len();
+                            (compact_accessibility_tree(nodes), raw_count, None)
+                        }
+                        Err(error) => (Vec::new(), 0, Some(error.to_string())),
+                    }
+                } else {
+                    (
+                        Vec::new(),
+                        0,
+                        Some(
+                            "GNOME accessibility is disabled; call setup_accessibility first."
+                                .to_string(),
+                        ),
+                    )
+                }
+            }
+        );
+        let (screenshot, screenshot_error) = screenshot_result;
+        let (accessibility_tree, accessibility_tree_raw_count, accessibility_error) = tree_result;
         if accessibility_error.is_none() {
             self.cache_nodes(&accessibility_tree);
         }
@@ -433,6 +473,8 @@ impl ComputerUseLinux {
             }
         }
 
+        // Invalidate cached dims so the next pointer action re-reads fresh dimensions.
+        self.invalidate_pointer_dims_cache();
         let capture = capture_screenshot()
             .await
             .map_err(|e| ErrorData::internal_error(format!("screenshot failed: {e}"), None))?;
@@ -463,8 +505,11 @@ impl ComputerUseLinux {
     }
 
     /// Ensure the uinput absolute pointer exists and is calibrated to the current
-    /// logical desktop size. Takes a screenshot each call to detect resolution
-    /// changes; if dims are unchanged `resize` is a no-op (no device recreate).
+    /// logical desktop size. Logical dims are cached for `POINTER_DIMS_TTL` to
+    /// avoid a full screenshot round-trip on every click. The cache is invalidated
+    /// by `invalidate_pointer_dims_cache` when the model explicitly calls the
+    /// `screenshot` tool (so the next click is always calibrated after a fresh
+    /// screenshot observation).
     /// Returns `false` if disabled via `CODEX_COMPUTER_USE_DISABLE_ABS_POINTER`
     /// or if the screenshot or device creation fails.
     async fn ensure_abs_pointer(&self) -> bool {
@@ -475,17 +520,59 @@ impl ComputerUseLinux {
         {
             return false;
         }
-        let Ok(cap) = crate::screenshot::capture_screenshot().await else {
-            return false;
+
+        // Try to serve from cache first.
+        let cached = self
+            .pointer_dims_cache
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| (c.lw, c.lh, c.scale_x, c.scale_y, c.captured_at)));
+        let (lw, lh, scale_x, scale_y) = if let Some((lw, lh, sx, sy, at)) = cached {
+            if at.elapsed() < POINTER_DIMS_TTL {
+                (lw, lh, sx, sy)
+            } else {
+                // Cache expired — fall through to screenshot.
+                let Ok(cap) = crate::screenshot::capture_screenshot().await else {
+                    return false;
+                };
+                let lw = cap.logical_width as i32;
+                let lh = cap.logical_height as i32;
+                let scale_x = cap.logical_width as f64 / cap.width as f64;
+                let scale_y = cap.logical_height as f64 / cap.height as f64;
+                if let Ok(mut g) = self.pointer_dims_cache.lock() {
+                    *g = Some(CachedPointerDims {
+                        lw,
+                        lh,
+                        scale_x,
+                        scale_y,
+                        captured_at: Instant::now(),
+                    });
+                }
+                (lw, lh, scale_x, scale_y)
+            }
+        } else {
+            // No cache entry yet — take a screenshot.
+            let Ok(cap) = crate::screenshot::capture_screenshot().await else {
+                return false;
+            };
+            // Use logical dims for the ABS range so the compositor maps coordinates
+            // correctly regardless of display scale factor.
+            let lw = cap.logical_width as i32;
+            let lh = cap.logical_height as i32;
+            let scale_x = cap.logical_width as f64 / cap.width as f64;
+            let scale_y = cap.logical_height as f64 / cap.height as f64;
+            if let Ok(mut g) = self.pointer_dims_cache.lock() {
+                *g = Some(CachedPointerDims {
+                    lw,
+                    lh,
+                    scale_x,
+                    scale_y,
+                    captured_at: Instant::now(),
+                });
+            }
+            (lw, lh, scale_x, scale_y)
         };
-        // Use logical dims for the ABS range so the compositor maps coordinates
-        // correctly regardless of display scale factor. Physical dims are used
-        // by the model to express coordinates within the screenshot image; we
-        // convert them to logical space at click/drag time via pointer_coord_scale.
-        let lw = cap.logical_width as i32;
-        let lh = cap.logical_height as i32;
-        let scale_x = cap.logical_width as f64 / cap.width as f64;
-        let scale_y = cap.logical_height as f64 / cap.height as f64;
+
         // AbsPointer::create/resize call thread::sleep(500 ms) to let libinput
         // enumerate the new uinput device. Run on a blocking thread so the async
         // runtime worker is not stalled during that wait.
@@ -514,6 +601,12 @@ impl ComputerUseLinux {
         })
         .await
         .unwrap_or(false)
+    }
+
+    fn invalidate_pointer_dims_cache(&self) {
+        if let Ok(mut g) = self.pointer_dims_cache.lock() {
+            *g = None;
+        }
     }
 
     /// Try a coordinate click through the absolute uinput pointer. `Some(ok)` if
@@ -1009,7 +1102,14 @@ impl ComputerUseLinux {
         };
         let mut args = vec!["key".to_string()];
         args.extend(key_events);
-        let result = run_ydotool(&args).map(|output| vec![output]);
+        let ydotool_result = run_ydotool(&args);
+        let result = match ydotool_result {
+            Ok(output) => Ok(vec![output]),
+            Err(_) if is_x11_session() => {
+                run_xdotool_key(&params.key).map(|output| vec![output])
+            }
+            Err(e) => Err(e),
+        };
         Json(action_result_with_focus(
             "press_key",
             result,
@@ -1103,7 +1203,14 @@ impl ComputerUseLinux {
                 }
             }
         }
-        let result = run_ydotool_type_text(&params.text).map(|output| vec![output]);
+        let ydotool_result = run_ydotool_type_text(&params.text);
+        let result = match ydotool_result {
+            Ok(output) => Ok(vec![output]),
+            Err(_) if is_x11_session() => {
+                run_xdotool_type(&params.text).map(|output| vec![output])
+            }
+            Err(e) => Err(e),
+        };
         Json(action_result_with_focus(
             "type_text",
             result,
@@ -1127,6 +1234,11 @@ pub async fn serve_mcp() -> Result<()> {
         .waiting()
         .await?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+struct ListInstalledAppsOutput {
+    apps: Vec<InstalledApp>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2560,6 +2672,104 @@ fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
             }
         }
         Err(error) => Err(format!("failed to run ydotool: {error}")),
+    }
+}
+
+fn is_x11_session() -> bool {
+    // DISPLAY must be set and XDG_SESSION_TYPE must not be "wayland".
+    env::var_os("DISPLAY").is_some()
+        && env::var("XDG_SESSION_TYPE")
+            .ok()
+            .as_deref()
+            .map(|v| !v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(true)
+}
+
+/// Translate a key name (as accepted by `press_key`) to the X11 keysym string
+/// expected by `xdotool key`.
+fn key_to_xdotool(key: &str) -> Option<String> {
+    let norm = normalize_key(key);
+    let xsym = match norm.as_str() {
+        "enter" | "return" => "Return",
+        "escape" | "esc" => "Escape",
+        "tab" => "Tab",
+        "backspace" => "BackSpace",
+        "delete" | "del" => "Delete",
+        "space" => "space",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" | "page_up" => "Prior",
+        "pagedown" | "page_down" => "Next",
+        "arrowup" | "up" => "Up",
+        "arrowdown" | "down" => "Down",
+        "arrowleft" | "left" => "Left",
+        "arrowright" | "right" => "Right",
+        "f1" => "F1",
+        "f2" => "F2",
+        "f3" => "F3",
+        "f4" => "F4",
+        "f5" => "F5",
+        "f6" => "F6",
+        "f7" => "F7",
+        "f8" => "F8",
+        "f9" => "F9",
+        "f10" => "F10",
+        "f11" => "F11",
+        "f12" => "F12",
+        "ctrl" | "control" => "ctrl",
+        "alt" | "option" => "alt",
+        "shift" => "shift",
+        "meta" | "super" | "cmd" | "command" => "super",
+        other => {
+            // Single printable character — pass through as-is (xdotool accepts
+            // bare characters like "a", "A", "1").
+            let mut chars = other.chars();
+            let first = chars.next()?;
+            if chars.next().is_none() && !first.is_control() {
+                return Some(first.to_string());
+            }
+            return None;
+        }
+    };
+    Some(xsym.to_string())
+}
+
+fn run_xdotool_key(key: &str) -> std::result::Result<Output, String> {
+    // Build the xdotool keysym string: modifiers joined with "+" around the key.
+    let parts: Vec<&str> = key
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let translated: Vec<String> = parts
+        .iter()
+        .filter_map(|p| key_to_xdotool(p))
+        .collect();
+    if translated.len() != parts.len() {
+        return Err(format!("xdotool: unsupported key {key:?}"));
+    }
+    let keysym = translated.join("+");
+    match Command::new("xdotool").args(["key", "--clearmodifiers", &keysym]).output() {
+        Ok(output) if output.status.success() => Ok(output),
+        Ok(output) => Err(format!(
+            "xdotool key {keysym} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(e) => Err(format!("failed to run xdotool: {e}")),
+    }
+}
+
+fn run_xdotool_type(text: &str) -> std::result::Result<Output, String> {
+    match Command::new("xdotool")
+        .args(["type", "--clearmodifiers", "--", text])
+        .output()
+    {
+        Ok(output) if output.status.success() => Ok(output),
+        Ok(output) => Err(format!(
+            "xdotool type failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(e) => Err(format!("failed to run xdotool: {e}")),
     }
 }
 

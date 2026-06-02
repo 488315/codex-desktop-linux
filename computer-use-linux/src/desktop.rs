@@ -207,6 +207,7 @@ struct DesktopInfo {
     app_type: Option<String>,
     has_exec: bool,
     no_display: bool,
+    comment: Option<String>,
 }
 
 fn parse_desktop_info(path: &Path) -> Option<DesktopInfo> {
@@ -218,6 +219,7 @@ fn parse_desktop_info(path: &Path) -> Option<DesktopInfo> {
         app_type: None,
         has_exec: false,
         no_display: false,
+        comment: None,
     };
 
     for raw_line in content.lines() {
@@ -234,6 +236,10 @@ fn parse_desktop_info(path: &Path) -> Option<DesktopInfo> {
             if info.name.is_none() {
                 info.name = Some(value.to_string());
             }
+        } else if let Some(value) = line.strip_prefix("Comment=") {
+            if info.comment.is_none() {
+                info.comment = Some(value.to_string());
+            }
         } else if let Some(value) = line.strip_prefix("Exec=") {
             info.exec = Some(value.to_string());
             info.has_exec = true;
@@ -245,6 +251,57 @@ fn parse_desktop_info(path: &Path) -> Option<DesktopInfo> {
     }
 
     Some(info)
+}
+
+// ── Installed-app enumeration ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct InstalledApp {
+    pub name: String,
+    pub desktop_file: String,
+    pub comment: Option<String>,
+}
+
+pub fn list_installed_apps() -> Vec<InstalledApp> {
+    let mut apps: Vec<InstalledApp> = Vec::new();
+    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for dir in desktop_search_dirs() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            let info = match parse_desktop_info(&path) {
+                Some(i)
+                    if i.has_exec
+                        && i.app_type.as_deref() == Some("Application")
+                        && !i.no_display =>
+                {
+                    i
+                }
+                _ => continue,
+            };
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let name = info.name.unwrap_or_else(|| stem.clone());
+            if seen_names.contains(&name) {
+                continue;
+            }
+            seen_names.insert(name.clone());
+            apps.push(InstalledApp {
+                name,
+                desktop_file: path.display().to_string(),
+                comment: info.comment,
+            });
+        }
+    }
+    apps.sort_by(|a, b| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()));
+    apps
 }
 
 // ── Launch methods ──────────────────────────────────────────────────────────
