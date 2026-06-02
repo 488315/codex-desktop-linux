@@ -29,41 +29,27 @@ pub struct AbsPointer {
 
 impl AbsPointer {
     /// Create the absolute pointer sized to the logical desktop `width`×`height`
-    /// (the portal screenshot dimensions). Blocks ~`settle` ms so libinput picks
+    /// (the portal screenshot dimensions). Blocks ~500 ms so libinput picks
     /// the device up before the first event.
     pub fn create(width: i32, height: i32) -> Result<Self> {
+        build_device(width.max(1), height.max(1))
+    }
+
+    /// Recalibrate the axis range to `width`×`height`. If the dimensions are
+    /// unchanged this is a no-op. When they differ, the uinput device is
+    /// destroyed and recreated (ABS axis ranges cannot be updated on a live fd),
+    /// which incurs another ~500 ms libinput settle delay.
+    pub fn resize(&mut self, width: i32, height: i32) -> Result<()> {
         let width = width.max(1);
         let height = height.max(1);
-        // value, min, max, fuzz, flat, resolution. resolution=1 unit/px.
-        let abs_x =
-            UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, AbsInfo::new(0, 0, width, 0, 0, 1));
-        let abs_y =
-            UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, AbsInfo::new(0, 0, height, 0, 0, 1));
-        let keys =
-            AttributeSet::from_iter([KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]);
-        // INPUT_PROP_DIRECT marks the device as a direct (absolute) pointer so
-        // libinput maps its axes to screen coordinates rather than treating it
-        // as a relative touchpad.
-        let props = AttributeSet::from_iter([PropType::DIRECT]);
-
-        let device = VirtualDevice::builder()
-            .context("uinput builder (is /dev/uinput writable?)")?
-            .name("codex-computer-use-linux absolute pointer")
-            .with_properties(&props)?
-            .with_absolute_axis(&abs_x)?
-            .with_absolute_axis(&abs_y)?
-            .with_keys(&keys)?
-            .build()
-            .context("failed to create uinput absolute pointer device")?;
-
-        // Give udev/libinput time to enumerate the new device.
-        sleep(Duration::from_millis(500));
-
-        Ok(Self {
-            device,
-            width,
-            height,
-        })
+        if self.width == width && self.height == height {
+            return Ok(());
+        }
+        let new = build_device(width, height)?;
+        self.device = new.device;
+        self.width = new.width;
+        self.height = new.height;
+        Ok(())
     }
 
     /// Move the pointer to absolute logical coordinates `(x, y)`.
@@ -116,6 +102,39 @@ impl AbsPointer {
     }
 }
 
+fn build_device(width: i32, height: i32) -> Result<AbsPointer> {
+    // value, min, max, fuzz, flat, resolution. resolution=1 unit/px.
+    let abs_x =
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, AbsInfo::new(0, 0, width, 0, 0, 1));
+    let abs_y =
+        UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, AbsInfo::new(0, 0, height, 0, 0, 1));
+    let keys =
+        AttributeSet::from_iter([KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]);
+    // INPUT_PROP_DIRECT marks the device as a direct (absolute) pointer so
+    // libinput maps its axes to screen coordinates rather than treating it
+    // as a relative touchpad.
+    let props = AttributeSet::from_iter([PropType::DIRECT]);
+
+    let device = VirtualDevice::builder()
+        .context("uinput builder (is /dev/uinput writable?)")?
+        .name("codex-computer-use-linux absolute pointer")
+        .with_properties(&props)?
+        .with_absolute_axis(&abs_x)?
+        .with_absolute_axis(&abs_y)?
+        .with_keys(&keys)?
+        .build()
+        .context("failed to create uinput absolute pointer device")?;
+
+    // Give udev/libinput time to enumerate the new device.
+    sleep(Duration::from_millis(500));
+
+    Ok(AbsPointer {
+        device,
+        width,
+        height,
+    })
+}
+
 /// Pointer buttons we can synthesize.
 #[derive(Clone, Copy, Debug)]
 pub enum PointerButton {
@@ -138,6 +157,49 @@ impl PointerButton {
             Self::Left => KeyCode::BTN_LEFT.0,
             Self::Right => KeyCode::BTN_RIGHT.0,
             Self::Middle => KeyCode::BTN_MIDDLE.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_name_defaults_to_left() {
+        assert!(matches!(PointerButton::from_name(None), PointerButton::Left));
+        assert!(matches!(
+            PointerButton::from_name(Some("unknown")),
+            PointerButton::Left
+        ));
+    }
+
+    #[test]
+    fn from_name_recognises_right_and_middle() {
+        assert!(matches!(
+            PointerButton::from_name(Some("right")),
+            PointerButton::Right
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("RIGHT")),
+            PointerButton::Right
+        ));
+        assert!(matches!(
+            PointerButton::from_name(Some("middle")),
+            PointerButton::Middle
+        ));
+    }
+
+    #[test]
+    fn build_device_clamps_zero_dims_to_one() {
+        // build_device requires /dev/uinput; skip if unavailable.
+        if !std::path::Path::new("/dev/uinput").exists() {
+            return;
+        }
+        let p = crate::abs_pointer::AbsPointer::create(0, 0);
+        if let Ok(p) = p {
+            assert_eq!(p.width, 1);
+            assert_eq!(p.height, 1);
         }
     }
 }

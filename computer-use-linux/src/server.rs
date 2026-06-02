@@ -381,9 +381,11 @@ impl ComputerUseLinux {
         ]))
     }
 
-    /// Lazily create the uinput absolute pointer, sizing its ABS range to the
-    /// logical desktop (the portal screenshot dimensions). Returns `false` if it
-    /// can't be created or is disabled via `CODEX_COMPUTER_USE_DISABLE_ABS_POINTER`.
+    /// Ensure the uinput absolute pointer exists and is calibrated to the current
+    /// logical desktop size. Takes a screenshot each call to detect resolution
+    /// changes; if dims are unchanged `resize` is a no-op (no device recreate).
+    /// Returns `false` if disabled via `CODEX_COMPUTER_USE_DISABLE_ABS_POINTER`
+    /// or if the screenshot or device creation fails.
     async fn ensure_abs_pointer(&self) -> bool {
         if env::var("CODEX_COMPUTER_USE_DISABLE_ABS_POINTER")
             .ok()
@@ -392,26 +394,23 @@ impl ComputerUseLinux {
         {
             return false;
         }
-        if self
-            .abs_pointer
-            .lock()
-            .map(|g| g.is_some())
-            .unwrap_or(false)
-        {
-            return true;
-        }
         let Ok(cap) = crate::screenshot::capture_screenshot().await else {
             return false;
         };
-        match crate::abs_pointer::AbsPointer::create(cap.width as i32, cap.height as i32) {
-            Ok(pointer) => {
-                if let Ok(mut guard) = self.abs_pointer.lock() {
+        let w = cap.width as i32;
+        let h = cap.height as i32;
+        let Ok(mut guard) = self.abs_pointer.lock() else {
+            return false;
+        };
+        match guard.as_mut() {
+            Some(p) => p.resize(w, h).is_ok(),
+            None => match crate::abs_pointer::AbsPointer::create(w, h) {
+                Ok(pointer) => {
                     *guard = Some(pointer);
-                    return true;
+                    true
                 }
-                false
-            }
-            Err(_) => false,
+                Err(_) => false,
+            },
         }
     }
 
