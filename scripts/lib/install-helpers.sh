@@ -35,7 +35,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'error "Failed at line $LINENO (exit code $?)"' ERR
 
-CACHED_DMG_PATH="$SCRIPT_DIR/Codex.dmg"
+# Store the DMG in the XDG cache directory so it survives across builds (AUR
+# rebuilds, `git clean`, etc.).  Users can override with CODEX_DMG_CACHE_PATH.
+CACHED_DMG_PATH="${CODEX_DMG_CACHE_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/codex-desktop/Codex.dmg}"
 FRESH_INSTALL=0
 REUSE_CACHED_DMG=1
 PROVIDED_DMG_PATH=""
@@ -50,7 +52,8 @@ Converts the official macOS Codex Desktop app to run on Linux.
 
 Options:
   -h, --help     Show this help message and exit
-  --fresh        Remove existing install directory and cached DMG before building
+  --fresh        Remove existing install directory before building; also removes
+                 the cached DMG unless --reuse-dmg is also passed
   --reuse-dmg    Reuse cached Codex.dmg if present (default)
   --inspect      Inspect the DMG and write patch/rebuild reports without installing
   --report-dir DIR
@@ -64,6 +67,9 @@ Environment variables:
   CODEX_APP_DISPLAY_NAME
                       Override display name (default: Codex Desktop)
   CODEX_WEBVIEW_PORT  Override webview HTTP port (default: 5175, or 5176 for non-default app ids)
+  CODEX_DMG_CACHE_PATH
+                      Override the DMG cache path
+                      (default: ~/.cache/codex-desktop/Codex.dmg)
   ELECTRON_HEADERS_URL
                       Override the Electron headers URL used by @electron/rebuild
                       (default: https://artifacts.electronjs.org/headers/dist)

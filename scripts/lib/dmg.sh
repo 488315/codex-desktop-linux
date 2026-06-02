@@ -18,6 +18,8 @@ get_dmg() {
     info "Downloading Codex Desktop DMG..."
     local dmg_url="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
     info "URL: $dmg_url"
+    info "Cache: $dmg_dest"
+    mkdir -p "$(dirname "$dmg_dest")"
 
     if ! curl -L --progress-bar --max-time 600 --connect-timeout 30 \
             -o "$dmg_dest" "$dmg_url"; then
