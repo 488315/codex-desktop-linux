@@ -92,7 +92,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "list_apps",
-        description = "List running Linux desktop app candidates visible to the Computer Use backend.",
+        description = "List running Linux desktop apps with their compositor window_id, app_id, title, and accessibility roots. Use window_id from windows[] as the selector for get_app_state, screenshot, activate_window, press_key, and type_text — it is the most reliable way to target a specific app on Linux. accessible_apps lists AT-SPI roots (names may differ from the visible window title, e.g. Firefox registers as 'Navigator').",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -106,11 +106,18 @@ impl ComputerUseLinux {
             Err(error) => (Vec::new(), Some(error.to_string())),
         };
 
+        let (windows, windows_error) = match list_windows().await {
+            Ok(windows) => (windows, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+
         Json(ListAppsOutput {
-            apps: list_process_apps(),
+            apps: list_process_apps(&windows),
             accessible_apps,
             accessibility_error,
-            note: "Linux Computer Use lists process candidates plus AT-SPI application roots when accessibility is enabled.".to_string(),
+            windows: windows,
+            windows_error,
+            note: "Use window_id from windows[] to target apps reliably. AT-SPI names in accessible_apps may differ from window titles (e.g. Firefox → 'Navigator'); get_app_state bridges them via PID when window_id is supplied.".to_string(),
         })
     }
 
@@ -1011,6 +1018,8 @@ struct ListAppsOutput {
     apps: Vec<AppCandidate>,
     accessible_apps: Vec<AccessibleAppSummary>,
     accessibility_error: Option<String>,
+    windows: Vec<WindowInfo>,
+    windows_error: Option<String>,
     note: String,
 }
 
@@ -1092,6 +1101,13 @@ struct AppCandidate {
     name: String,
     pid: u32,
     command: String,
+    /// Compositor window_id — pass this to get_app_state, screenshot, press_key, etc.
+    #[schemars(skip_serializing_if = "Option::is_none")]
+    window_id: Option<u64>,
+    #[schemars(skip_serializing_if = "Option::is_none")]
+    app_id: Option<String>,
+    #[schemars(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1488,6 +1504,32 @@ impl ComputerUseLinux {
         window_context: Option<&WindowInfo>,
     ) -> Option<String> {
         if let Some(explicit) = trimmed_nonempty(params.app_name_or_bundle_identifier.as_deref()) {
+            // When no window context is provided, try to resolve the user-facing name
+            // to an AT-SPI object ref via the window list. This bridges names like
+            // "Firefox" to the internal AT-SPI name "Navigator" by matching on title,
+            // app_id, or wm_class, then looking up the AT-SPI root by PID.
+            if window_context.is_none() && params.pid.is_none() {
+                if let Ok(windows) = list_windows().await {
+                    let lower = explicit.to_ascii_lowercase();
+                    let matched = windows.iter().find(|w| {
+                        w.title.as_deref().is_some_and(|t| t.to_ascii_lowercase().contains(&lower))
+                            || w.app_id.as_deref().is_some_and(|a| a.to_ascii_lowercase().contains(&lower))
+                            || w.wm_class.as_deref().is_some_and(|c| c.to_ascii_lowercase().contains(&lower))
+                    });
+                    if let Some(window) = matched {
+                        if let Some(pid) = window.pid {
+                            if let Ok(apps) = list_accessible_apps(200).await {
+                                let candidates = accessibility_filter_candidates(Some(window));
+                                if let Some(object_ref) =
+                                    select_accessibility_object_ref(&apps, pid, &candidates)
+                                {
+                                    return Some(object_ref);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return Some(explicit.to_string());
         }
 
@@ -2668,7 +2710,13 @@ fn user_id() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn list_process_apps() -> Vec<AppCandidate> {
+fn list_process_apps(windows: &[WindowInfo]) -> Vec<AppCandidate> {
+    // Build a pid→window index so we can annotate and filter by window presence.
+    let pid_to_window: std::collections::HashMap<u32, &WindowInfo> = windows
+        .iter()
+        .filter_map(|w| w.pid.map(|pid| (pid, w)))
+        .collect();
+
     let output = Command::new("ps")
         .args(["-eo", "pid=,comm=,args="])
         .output();
@@ -2679,44 +2727,74 @@ fn list_process_apps() -> Vec<AppCandidate> {
         return Vec::new();
     }
 
-    String::from_utf8_lossy(&output.stdout)
+    let mut seen_pids = std::collections::HashSet::new();
+
+    // Processes that have a compositor window or match the keyword heuristic.
+    let mut candidates: Vec<AppCandidate> = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(parse_process_line)
-        .filter(|app| looks_like_desktop_app(&app.name, &app.command))
+        .filter_map(|line| parse_process_line(line, &pid_to_window))
+        .filter(|app| app.window_id.is_some() || has_display_env(app.pid))
         .take(50)
-        .collect()
+        .inspect(|app| {
+            seen_pids.insert(app.pid);
+        })
+        .collect();
+
+    // Also include windowed apps whose process didn't appear in ps output
+    // (e.g. wrapped scripts, flatpak host processes).
+    for window in windows {
+        let pid = match window.pid {
+            Some(p) if !seen_pids.contains(&p) => p,
+            _ => continue,
+        };
+        let name = window
+            .app_id
+            .clone()
+            .or_else(|| window.wm_class.clone())
+            .or_else(|| window.title.clone())
+            .unwrap_or_else(|| format!("window:{}", window.window_id));
+        candidates.push(AppCandidate {
+            name,
+            pid,
+            command: String::new(),
+            window_id: Some(window.window_id),
+            app_id: window.app_id.clone(),
+            title: window.title.clone(),
+        });
+        seen_pids.insert(pid);
+    }
+
+    candidates
 }
 
-fn parse_process_line(line: &str) -> Option<AppCandidate> {
+fn parse_process_line(
+    line: &str,
+    pid_to_window: &std::collections::HashMap<u32, &WindowInfo>,
+) -> Option<AppCandidate> {
     let trimmed = line.trim();
     let mut parts = trimmed.splitn(3, char::is_whitespace);
-    let pid = parts.next()?.parse().ok()?;
+    let pid: u32 = parts.next()?.parse().ok()?;
     let name = parts.next()?.to_string();
     let command = parts.next().unwrap_or("").trim().to_string();
-    Some(AppCandidate { name, pid, command })
+    let window = pid_to_window.get(&pid);
+    Some(AppCandidate {
+        name,
+        pid,
+        command,
+        window_id: window.map(|w| w.window_id),
+        app_id: window.and_then(|w| w.app_id.clone()),
+        title: window.and_then(|w| w.title.clone()),
+    })
 }
 
-fn looks_like_desktop_app(name: &str, command: &str) -> bool {
-    let haystack = format!("{name} {command}").to_ascii_lowercase();
-    [
-        "codex",
-        "electron",
-        "chrome",
-        "chromium",
-        "firefox",
-        "brave",
-        "code",
-        "gnome-terminal",
-        "ptyxis",
-        "kgx",
-        "nautilus",
-        "slack",
-        "discord",
-        "spotify",
-        "obsidian",
-    ]
-    .iter()
-    .any(|needle| haystack.contains(needle))
+fn has_display_env(pid: u32) -> bool {
+    let path = format!("/proc/{pid}/environ");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return false;
+    };
+    bytes.split(|&b| b == 0).any(|var| {
+        var.starts_with(b"WAYLAND_DISPLAY=") || var.starts_with(b"DISPLAY=")
+    })
 }
 
 #[cfg(test)]
