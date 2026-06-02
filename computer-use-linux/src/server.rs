@@ -3,6 +3,7 @@ use crate::atspi_tree::{
     snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary, Bounds,
     ValueSetInvocation,
 };
+use crate::desktop::{launch_app, LaunchAppResult};
 use crate::diagnostics::{
     doctor_report, setup_accessibility_report, setup_ydotool_report, DoctorReport, SetupReport,
     YdotoolSetupReport,
@@ -120,6 +121,20 @@ impl ComputerUseLinux {
     )]
     fn setup_ydotool(&self) -> Json<YdotoolSetupReport> {
         Json(setup_ydotool_report())
+    }
+
+    #[tool(
+        name = "launch_app",
+        description = "Launch an installed Linux desktop application by name, desktop-file stem, or reverse-DNS id. Accepts fuzzy names (e.g. \"Firefox\", \"firefox\", \"org.mozilla.firefox\", \"firefox.desktop\"). Tries gtk-launch, then gio open, then a direct Exec= spawn. Returns ok=true as soon as the process is started — the app may still be loading. After launching, call get_app_state or list_apps to confirm the window appeared.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    fn launch_app(&self, Parameters(params): Parameters<LaunchAppParams>) -> Json<LaunchAppResult> {
+        Json(launch_app(&params.app_name))
     }
 
     #[tool(
@@ -1318,6 +1333,13 @@ impl SetValueParams {
             states: &self.states,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct LaunchAppParams {
+    /// App name, desktop-file stem, or reverse-DNS id to launch.
+    /// Examples: "Firefox", "firefox", "org.mozilla.firefox", "firefox.desktop".
+    app_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

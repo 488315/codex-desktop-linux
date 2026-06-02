@@ -1,6 +1,7 @@
 mod abs_pointer;
 mod atspi_tree;
 mod cosmic_helper;
+mod desktop;
 mod diagnostics;
 mod gnome_extension;
 mod identity;
