@@ -4,8 +4,8 @@ pkgname=codex-desktop-linux-git
 _pkgbase=codex-desktop-linux
 _pkgname=codex-desktop
 # Pinned commit — run ./update.sh to advance to latest
-_commit=73f916889cb55fb74aea6acffb070c238bb3fda6
-pkgver=0.r0.g73f9168
+_commit=a0341e1d27d21eaaae9d01d94ab2f3bac1454334
+pkgver=0.r843.ga0341e1
 pkgrel=1
 pkgdesc="Codex Desktop for Linux with Computer Use, built from the latest upstream Git commit"
 arch=('x86_64' 'aarch64')
@@ -88,7 +88,7 @@ build() {
     export CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1
 
     # Build the Electron app from the upstream DMG via install.sh
-    make build-app
+    make build-app-fresh
 
     # Build the self-update manager daemon
     make build-updater
