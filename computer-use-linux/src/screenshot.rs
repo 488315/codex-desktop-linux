@@ -50,11 +50,19 @@ pub async fn capture_screenshot() -> Result<ScreenshotCapture> {
         Err(e) => e,
     };
 
+    // X11 fallback: silent, no daemon required, works on pure X11 sessions
+    // where neither GNOME Shell nor Spectacle is available.
+    let x11_err = match capture_with_x11() {
+        Ok(capture) => return Ok(capture),
+        Err(e) => e,
+    };
+
     match capture_with_portal().await {
         Ok(capture) => Ok(capture),
         Err(portal_err) => Err(anyhow!(
             "GNOME Shell screenshot failed: {gnome_err:#}; \
              spectacle screenshot failed: {spectacle_err:#}; \
+             X11 screenshot failed: {x11_err:#}; \
              XDG portal screenshot failed: {portal_err:#}"
         )),
     }
@@ -88,6 +96,56 @@ fn try_spectacle_capture(path: &Path) -> Result<ScreenshotCapture> {
     }
 
     read_png_as_capture_inner(path, "spectacle")
+}
+
+fn capture_with_x11() -> Result<ScreenshotCapture> {
+    if std::env::var_os("DISPLAY").is_none() {
+        bail!("DISPLAY not set, not an X11 session");
+    }
+    let path = temp_png_path("x11");
+    let result = try_scrot_capture(&path).or_else(|_| try_maim_capture(&path));
+    let _ = fs::remove_file(&path);
+    result
+}
+
+fn try_scrot_capture(path: &Path) -> Result<ScreenshotCapture> {
+    let filename = path
+        .to_str()
+        .context("temporary screenshot path is not valid UTF-8")?;
+    let output = Command::new("scrot")
+        .args(["--silent", filename])
+        .output()
+        .context("scrot is not installed or could not be run")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        bail!(
+            "scrot exited with {}: {}",
+            output.status,
+            if stderr.is_empty() { "no output" } else { stderr }
+        );
+    }
+    read_png_as_capture_inner(path, "x11-scrot")
+}
+
+fn try_maim_capture(path: &Path) -> Result<ScreenshotCapture> {
+    let filename = path
+        .to_str()
+        .context("temporary screenshot path is not valid UTF-8")?;
+    let output = Command::new("maim")
+        .arg(filename)
+        .output()
+        .context("maim is not installed or could not be run")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        bail!(
+            "maim exited with {}: {}",
+            output.status,
+            if stderr.is_empty() { "no output" } else { stderr }
+        );
+    }
+    read_png_as_capture_inner(path, "x11-maim")
 }
 
 async fn capture_with_gnome_shell() -> Result<ScreenshotCapture> {
@@ -433,6 +491,49 @@ mod tests {
         cleanup_gnome_requested_path(&path);
 
         assert!(!path.exists());
+    }
+
+    // X11 tests use read_png_as_capture_inner directly — try_scrot_capture and
+    // try_maim_capture run external binaries not available in the test environment.
+
+    #[test]
+    fn x11_scrot_source_label_propagates_from_valid_png() {
+        let path = test_path("x11-scrot-valid");
+        fs::write(&path, valid_png(1920, 1080)).unwrap();
+
+        let capture = read_png_as_capture_inner(&path, "x11-scrot").unwrap();
+
+        assert_eq!(capture.source, "x11-scrot");
+        assert_eq!(capture.width, 1920);
+        assert_eq!(capture.height, 1080);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn x11_maim_source_label_propagates_from_valid_png() {
+        let path = test_path("x11-maim-valid");
+        fs::write(&path, valid_png(2560, 1440)).unwrap();
+
+        let capture = read_png_as_capture_inner(&path, "x11-maim").unwrap();
+
+        assert_eq!(capture.source, "x11-maim");
+        assert_eq!(capture.width, 2560);
+        assert_eq!(capture.height, 1440);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn capture_with_x11_fails_gracefully_without_display() {
+        // If DISPLAY is set (running inside an X11/XWayland session), the guard
+        // passes and we hit the binary check instead — skip in that case.
+        if std::env::var_os("DISPLAY").is_some() {
+            return;
+        }
+        let err = capture_with_x11().unwrap_err();
+        assert!(
+            err.to_string().contains("DISPLAY"),
+            "error should mention DISPLAY, got: {err}"
+        );
     }
 
     // spectacle tests use read_png_as_capture_inner directly — try_spectacle_capture

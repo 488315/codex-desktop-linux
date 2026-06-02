@@ -4,8 +4,8 @@ pkgname=codex-desktop-linux-git
 _pkgbase=codex-desktop-linux
 _pkgname=codex-desktop
 # Pinned commit — run ./update.sh to advance to latest
-_commit=01a26ee8d9415261e34679250937bca97f691aba
-pkgver=0.r826.g01a26ee
+_commit=c956372c51b189bf47845081288db9dea671b261
+pkgver=0.r830.gc956372
 pkgrel=1
 pkgdesc="Codex Desktop for Linux with Computer Use, built from the latest upstream Git commit"
 arch=('x86_64' 'aarch64')
@@ -57,6 +57,8 @@ optdepends=(
     'zenity: GTK dialog fallback when the Codex CLI is missing'
     'kdialog: KDE dialog fallback when the Codex CLI is missing'
     'ydotool: input synthesis support for Linux Computer Use'
+    'scrot: X11 screenshot fallback for Linux Computer Use'
+    'maim: X11 screenshot fallback for Linux Computer Use (alternative to scrot)'
     'libnotify: desktop notifications for updates (notify-send)'
 )
 provides=('codex-desktop')
