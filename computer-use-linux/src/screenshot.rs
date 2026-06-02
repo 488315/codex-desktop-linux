@@ -8,6 +8,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zbus::{
@@ -37,15 +38,56 @@ enum ScreenshotCleanup {
 pub async fn capture_screenshot() -> Result<ScreenshotCapture> {
     hydrate_session_bus_env();
 
-    match capture_with_gnome_shell().await {
+    let gnome_err = match capture_with_gnome_shell().await {
+        Ok(capture) => return Ok(capture),
+        Err(e) => e,
+    };
+
+    // Spectacle (KDE/Plasma) is silent and requires no interactive approval
+    // dialog, so try it before the XDG portal which may prompt the user.
+    let spectacle_err = match capture_with_spectacle() {
+        Ok(capture) => return Ok(capture),
+        Err(e) => e,
+    };
+
+    match capture_with_portal().await {
         Ok(capture) => Ok(capture),
-        Err(gnome_error) => match capture_with_portal().await {
-            Ok(capture) => Ok(capture),
-            Err(portal_error) => Err(anyhow!(
-                "GNOME Shell screenshot failed: {gnome_error}; XDG portal screenshot failed: {portal_error}"
-            )),
-        },
+        Err(portal_err) => Err(anyhow!(
+            "GNOME Shell screenshot failed: {gnome_err:#}; \
+             spectacle screenshot failed: {spectacle_err:#}; \
+             XDG portal screenshot failed: {portal_err:#}"
+        )),
     }
+}
+
+fn capture_with_spectacle() -> Result<ScreenshotCapture> {
+    let path = temp_png_path("spectacle");
+    let result = try_spectacle_capture(&path);
+    let _ = fs::remove_file(&path);
+    result
+}
+
+fn try_spectacle_capture(path: &Path) -> Result<ScreenshotCapture> {
+    let filename = path
+        .to_str()
+        .context("temporary screenshot path is not valid UTF-8")?;
+
+    let output = Command::new("spectacle")
+        .args(["--background", "--nonotify", "--fullscreen", "--output", filename])
+        .output()
+        .context("spectacle is not installed or could not be run")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        bail!(
+            "spectacle exited with {}: {}",
+            output.status,
+            if stderr.is_empty() { "no output" } else { stderr }
+        );
+    }
+
+    read_png_as_capture_inner(path, "spectacle")
 }
 
 async fn capture_with_gnome_shell() -> Result<ScreenshotCapture> {
@@ -391,6 +433,55 @@ mod tests {
         cleanup_gnome_requested_path(&path);
 
         assert!(!path.exists());
+    }
+
+    // spectacle tests use read_png_as_capture_inner directly — try_spectacle_capture
+    // runs the spectacle binary which is not available in the test environment.
+
+    #[test]
+    fn spectacle_source_label_propagates_from_valid_png() {
+        let path = test_path("spectacle-valid");
+        fs::write(&path, valid_png(2560, 1440)).unwrap();
+
+        let capture = read_png_as_capture_inner(&path, "spectacle").unwrap();
+
+        assert_eq!(capture.source, "spectacle");
+        assert_eq!(capture.width, 2560);
+        assert_eq!(capture.height, 1440);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn spectacle_empty_output_file_returns_error() {
+        let path = test_path("spectacle-empty");
+        fs::write(&path, b"").unwrap();
+
+        let err = read_png_as_capture_inner(&path, "spectacle").unwrap_err();
+
+        assert!(err.to_string().contains("screenshot file was empty"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn spectacle_corrupt_output_file_returns_error() {
+        let path = test_path("spectacle-corrupt");
+        fs::write(&path, b"not a png").unwrap();
+
+        let err = read_png_as_capture_inner(&path, "spectacle").unwrap_err();
+
+        assert!(err.to_string().contains("not a valid PNG"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn capture_with_spectacle_fails_gracefully_when_not_installed() {
+        // spectacle is not available in the test environment; the function must
+        // return an error (not panic) and must not leave a temp file behind.
+        let err = capture_with_spectacle().unwrap_err();
+        assert!(
+            err.to_string().contains("spectacle"),
+            "error should mention spectacle, got: {err}"
+        );
     }
 
     #[tokio::test]
