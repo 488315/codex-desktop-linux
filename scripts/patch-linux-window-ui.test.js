@@ -71,6 +71,7 @@ const {
 } = require("./ci/validate-patch-report.js");
 const {
   buildInfo,
+  githubCommitUrl,
   packageProfile,
   sourceInfo,
 } = require("./lib/build-info.js");
@@ -336,6 +337,7 @@ test("build info captures DMG hash, features, distro profile, and source revisio
     assert.equal(info.upstreamDmg.appVersion, "1.2.3");
     assert.equal(info.source.shortCommit, "abcdef123456");
     assert.equal(info.source.remote, "https://github.com/example/codex-desktop-linux.git");
+    assert.equal(info.source.commitUrl, "https://github.com/example/codex-desktop-linux/commit/abcdef1234567890");
     assert.equal(info.packageProfile.id, "debian-family");
     assert.equal(info.packageProfile.packageManager, "apt");
     assert.deepEqual(info.linuxFeatures.enabled, ["read-aloud", "zed-opener"]);
@@ -365,10 +367,24 @@ test("build info sanitizes staged source metadata from packaged update-builder",
 
     const info = sourceInfo(tempRoot, {});
     assert.equal(info.remote, "https://example.com/org/repo.git");
+    assert.equal(info.commitUrl, null);
     assert.equal(info.sourceInfoPath, undefined);
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("build info derives GitHub commit links from common remote forms", () => {
+  assert.equal(
+    githubCommitUrl("git@github.com:ilysenko/codex-desktop-linux.git", "0123456789abcdef"),
+    "https://github.com/ilysenko/codex-desktop-linux/commit/0123456789abcdef",
+  );
+  assert.equal(
+    githubCommitUrl("ssh://git@github.com/ilysenko/codex-desktop-linux.git", "fedcba9876543210"),
+    "https://github.com/ilysenko/codex-desktop-linux/commit/fedcba9876543210",
+  );
+  assert.equal(githubCommitUrl("https://example.com/org/repo.git", "0123456789abcdef"), null);
+  assert.equal(githubCommitUrl("https://github.com/org/repo.git", "not-a-sha"), null);
 });
 
 test("package profile distinguishes Fedora package managers by major version", () => {
@@ -1382,6 +1398,9 @@ test("adds Linux build information to the tray menu", () => {
   assert.match(patched, /Enabled features:/);
   assert.match(patched, /Upstream DMG SHA256:/);
   assert.match(patched, /Linux source revision:/);
+  assert.match(patched, /Source commit URL:/);
+  assert.match(patched, /Open Commit/);
+  assert.match(patched, /shell\?\.openExternal/);
 });
 
 test("adds Linux build information to current tray menu shape", () => {
