@@ -616,23 +616,9 @@ fn handle_chrome_message(state: &SharedState, message: Value) {
             return;
         };
 
-        // chrome.runtime.getVersion() is available in Chrome/Chromium 143+.
-        // Keep forwarding getInfo for browsers that support it, and only
-        // synthesize discovery metadata for this older-runtime compatibility
-        // failure.
-        if pending.fallback_extension_info && is_missing_chrome_runtime_get_version_error(&message)
-        {
-            state.send_client(
-                pending.client_id,
-                &extension_info_response(pending.client_request_id, state.extension_id.as_deref()),
-            );
-            return;
-        }
-
-        state.send_client(
-            pending.client_id,
-            &with_id(message, pending.client_request_id),
-        );
+        let response =
+            client_response_for_chrome_response(message, &pending, state.extension_id.as_deref());
+        state.send_client(pending.client_id, &response);
         return;
     }
 
@@ -718,6 +704,22 @@ fn is_missing_chrome_runtime_get_version_error(message: &Value) -> bool {
         .and_then(|error| error.get("message"))
         .and_then(Value::as_str)
         .is_some_and(|message| message.contains("chrome.runtime.getVersion is not a function"))
+}
+
+fn client_response_for_chrome_response(
+    message: Value,
+    pending: &PendingChromeRequest,
+    extension_id: Option<&str>,
+) -> Value {
+    // chrome.runtime.getVersion() is available in Chrome/Chromium 143+.
+    // Keep forwarding getInfo for browsers that support it, and only
+    // synthesize discovery metadata for this older-runtime compatibility
+    // failure.
+    if pending.fallback_extension_info && is_missing_chrome_runtime_get_version_error(&message) {
+        extension_info_response(pending.client_request_id.clone(), extension_id)
+    } else {
+        with_id(message, pending.client_request_id.clone())
+    }
 }
 
 fn extension_info_response(id: Value, extension_id: Option<&str>) -> Value {
@@ -1074,14 +1076,36 @@ mod tests {
 
     #[test]
     fn get_info_falls_back_when_runtime_get_version_is_missing() {
-        let (client_writer, mut client_reader) = UnixStream::pair().unwrap();
-        let mut state = test_host_state();
-        state.clients.insert(
-            1,
-            Client {
-                writer: Arc::new(Mutex::new(client_writer)),
-            },
+        let pending = PendingChromeRequest {
+            client_id: 1,
+            client_request_id: json!("info-1"),
+            fallback_extension_info: true,
+        };
+        let message = client_response_for_chrome_response(
+            json!({
+                "jsonrpc": "2.0",
+                "id": "linux-1-1",
+                "error": {
+                    "code": 1,
+                    "message": "chrome.runtime.getVersion is not a function"
+                }
+            }),
+            &pending,
+            Some("abcdefghijklmnopabcdefghijklmnop"),
         );
+
+        assert_eq!(message["id"], "info-1");
+        assert_eq!(message["result"]["type"], "extension");
+        assert_eq!(message["result"]["version"], "unknown");
+        assert_eq!(
+            message["result"]["metadata"]["extensionId"],
+            "abcdefghijklmnopabcdefghijklmnop"
+        );
+    }
+
+    #[test]
+    fn chrome_response_removes_pending_request_before_sending_to_client() {
+        let mut state = test_host_state();
         state.pending_chrome_requests.insert(
             "linux-1-1".to_string(),
             PendingChromeRequest {
@@ -1090,7 +1114,6 @@ mod tests {
                 fallback_extension_info: true,
             },
         );
-        state.extension_id = Some("abcdefghijklmnopabcdefghijklmnop".to_string());
         let state = Arc::new(Mutex::new(state));
 
         handle_chrome_message(
@@ -1105,14 +1128,6 @@ mod tests {
             }),
         );
 
-        let message = read_frame(&mut client_reader).unwrap().unwrap();
-        assert_eq!(message["id"], "info-1");
-        assert_eq!(message["result"]["type"], "extension");
-        assert_eq!(message["result"]["version"], "unknown");
-        assert_eq!(
-            message["result"]["metadata"]["extensionId"],
-            "abcdefghijklmnopabcdefghijklmnop"
-        );
         assert!(state.lock().unwrap().pending_chrome_requests.is_empty());
     }
 
